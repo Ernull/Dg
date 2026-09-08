@@ -1,13 +1,6 @@
 """
 🚀 Advanced Digikala Jet Link Maker Bot & Secure API Gateway
-Features:
-- Completely Hides Session Data from Browser View (Anti-Inspect)
-- Dedicated API Endpoint for Custom Android App
-- User Quota / Limit System
-- Link History for Users ("لینک‌های من")
-- Continuous Link Flow ("ساخت لینک بعدی / پایان")
-- Protected Admin Panel with 30/60 Days Expiry Toggle
-- Webhook & Redis Ready for Railway Deployment
+Fixed & Optimized for Production Deployment on Railway
 """
 
 import os
@@ -16,11 +9,13 @@ import uuid
 import secrets
 import asyncio
 import logging
+from io import BytesIO
 from datetime import datetime, timedelta
 import aiohttp
 from aiohttp import web
 import redis.asyncio as aioredis
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ConversationHandler, ContextTypes, filters
@@ -33,12 +28,18 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://your-domain.com").rstrip('/
 PORT = int(os.environ.get("PORT", "8080"))
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
-# کلید هدر امنیتی برای ارتباط اپلیکیشن با سرور
 APP_SECRET_HEADER = "JetApp-Secure-Client"
 
 # Conversation States
 ASK_PHONE, ASK_OTP, ACTION_CHOICE = range(3)
-ADMIN_BAN, ADMIN_UNBAN, ADMIN_SET_USER_LIMIT_ID, ADMIN_SET_USER_LIMIT_VAL, ADMIN_SET_DEFAULT_LIMIT = range(3, 8)
+(
+    ADMIN_BAN,
+    ADMIN_UNBAN,
+    ADMIN_SET_USER_LIMIT_ID,
+    ADMIN_SET_USER_LIMIT_VAL,
+    ADMIN_SET_DEFAULT_LIMIT,
+    ADMIN_GET_JSON_PHONE
+) = range(3, 9)
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -109,19 +110,71 @@ class Database:
     async def set_expiry_days(self, days: int):
         await self.redis.set("config:expiry_days", str(days))
 
-    async def save_session(self, token_key: str, data: dict, days: int):
+    async def save_session(self, token_key: str, data: dict, days: int, phone: str = None):
         expire_seconds = days * 24 * 3600
-        await self.redis.setex(f"jet_session:{token_key}", expire_seconds, json.dumps(data, ensure_ascii=False))
+        payload = json.dumps(data, ensure_ascii=False)
+        await self.redis.setex(f"jet_session:{token_key}", expire_seconds, payload)
+        if phone:
+            await self.redis.setex(f"phone_session:{phone}", expire_seconds, payload)
 
     async def get_session(self, token_key: str):
         data = await self.redis.get(f"jet_session:{token_key}")
         return json.loads(data) if data else None
 
+    async def get_session_by_phone(self, phone: str):
+        direct_data = await self.redis.get(f"phone_session:{phone}")
+        if direct_data:
+            return json.loads(direct_data)
+
+        keys = await self.redis.keys("jet_session:*")
+        for k in keys:
+            val = await self.redis.get(k)
+            if val and phone in val:
+                try:
+                    return json.loads(val)
+                except Exception:
+                    pass
+        return None
+
+    async def export_full_db(self) -> dict:
+        backup = {
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "configs": {
+                "expiry_days": await self.get_expiry_days(),
+                "default_limit": await self.get_default_limit()
+            },
+            "users": {},
+            "user_links": {},
+            "logs": [],
+            "active_sessions_count": len(await self.redis.keys("jet_session:*"))
+        }
+
+        user_keys = await self.redis.keys("user:*")
+        for uk in user_keys:
+            uid = uk.split(":")[1]
+            backup["users"][uid] = await self.redis.hgetall(uk)
+
+        link_keys = await self.redis.keys("user_links:*")
+        for lk in link_keys:
+            uid = lk.split(":")[1]
+            items = await self.redis.lrange(lk, 0, -1)
+            backup["user_links"][uid] = [json.loads(x) for x in items]
+
+        raw_logs = await self.redis.lrange("bot:logs", 0, -1)
+        backup["logs"] = [json.loads(x) for x in raw_logs]
+
+        return backup
+
     async def get_stats(self):
         keys = await self.redis.keys("user:*")
         total = len(keys)
-        banned = sum([1 for k in keys if await self.redis.hget(k, "banned") == "1"])
-        links = sum([int(await self.redis.hget(k, "links") or 0) for k in keys])
+        banned = 0
+        links = 0
+        for k in keys:
+            user_info = await self.redis.hmget(k, ["banned", "links"])
+            if user_info[0] == "1":
+                banned += 1
+            links += int(user_info[1] or 0)
         return total, banned, links
 
 db = Database()
@@ -130,6 +183,7 @@ db = Database()
 class AsyncJetAuth:
     def __init__(self):
         self.client_id = "FINGERPRINTV2-6a44d158446867e4502af048b412cc7d"
+        self.timeout = aiohttp.ClientTimeout(total=12)
         self.headers = {
             'Accept': 'application/json, text/plain, */*',
             'Content-Type': 'application/json',
@@ -145,9 +199,9 @@ class AsyncJetAuth:
     async def request_otp(self, phone: str):
         url = "https://api.digikalajet.ir/user/login-register/?ch=jj"
         self.headers['X-Request-UUID'] = str(uuid.uuid4())
-        async with aiohttp.ClientSession(headers=self.headers) as session:
+        async with aiohttp.ClientSession(headers=self.headers, timeout=self.timeout) as session:
             try:
-                async with session.post(url, json={"phone": phone}, timeout=10) as res:
+                async with session.post(url, json={"phone": phone}) as res:
                     if res.status == 200:
                         data = await res.json()
                         return True, data.get("data", {}).get("token", "")
@@ -158,9 +212,9 @@ class AsyncJetAuth:
     async def confirm_phone(self, phone: str, code: str, otp_token: str):
         url = "https://api.digikalajet.ir/user/confirm-phone/?ch=jj"
         self.headers['X-Request-UUID'] = str(uuid.uuid4())
-        async with aiohttp.ClientSession(headers=self.headers) as session:
+        async with aiohttp.ClientSession(headers=self.headers, timeout=self.timeout) as session:
             try:
-                async with session.post(url, json={"phone": phone, "code": code, "token": otp_token}, timeout=10) as res:
+                async with session.post(url, json={"phone": phone, "code": code, "token": otp_token}) as res:
                     if res.status == 200:
                         return True, await res.json()
                     return False, f"HTTP {res.status}"
@@ -170,12 +224,13 @@ class AsyncJetAuth:
 def build_json(data: dict, phone: str):
     res_data = data.get("data", {})
     access_token = res_data.get("token", "")
-    if not access_token: return None
-    
+    if not access_token:
+        return None
+
     refresh_token = res_data.get("refresh_token", "")
     uid = res_data.get("user_id", 0)
-    user_info = res_data.get("user_info", {})
-    
+    user_info = res_data.get("user_info") or {}
+
     first_name = user_info.get('first_name', 'کاربر')
     last_name = user_info.get('last_name', 'جت')
     full_name = f"{first_name} {last_name}".strip()
@@ -197,12 +252,12 @@ def build_json(data: dict, phone: str):
         "appStyleMode": "jet", "externalToken": access_token,
         "plusMinimumPurchaseAmountRial": 1500000
     }
-    
+
     persist_root_dict = {
         "user": json.dumps(user_persist_obj, ensure_ascii=False),
         "_persist": json.dumps({"version": -1, "rehydrated": True})
     }
-    
+
     return {
         "cookies": [
             {"name": "token", "value": access_token, "domain": ".digikalajet.com", "path": "/", "secure": True, "sameSite": "unspecified"},
@@ -219,7 +274,7 @@ def build_json(data: dict, phone: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await db.init_user(user.id, user.first_name or "کاربر")
-    
+
     if await db.is_banned(user.id):
         return ConversationHandler.END
 
@@ -246,9 +301,9 @@ async def user_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    
+
     if await db.is_banned(user_id):
-        return
+        return ConversationHandler.END
 
     if query.data == "btn_make_link":
         used, max_l = await db.get_user_quota(user_id)
@@ -297,13 +352,13 @@ async def user_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text.strip()
     if len(phone) != 11 or not phone.startswith("09") or not phone.isdigit():
-        await update.message.reply_text("❌ فرمت شماره نامعتبر است. لطفاً شماره ۱۱ رقمی صحیح وارد کنید:")
+        await update.message.reply_text("❌ فرمت شماره نامعتبر است. شماره ۱۱ رقمی معتبر وارد کنید:")
         return ASK_PHONE
 
     msg = await update.message.reply_text("⏳ در حال ارسال پیامک...")
     jet = AsyncJetAuth()
     success, otp_token = await jet.request_otp(phone)
-    
+
     if not success or not otp_token:
         await msg.edit_text(f"❌ خطا در ارسال پیامک:\n{otp_token}\n\nمجدداً شماره را وارد کنید:")
         return ASK_PHONE
@@ -318,7 +373,7 @@ async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = context.user_data.get('phone')
     otp_token = context.user_data.get('otp_token')
     user_id = update.effective_user.id
-    
+
     if not phone or not otp_token:
         await update.message.reply_text("❌ نشست منقضی شد. لطفاً از ابتدا اقدام کنید: /start")
         return ConversationHandler.END
@@ -326,7 +381,7 @@ async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ در حال ساخت پیوند...")
     jet = AsyncJetAuth()
     success, response = await jet.confirm_phone(phone, code, otp_token)
-    
+
     if not success:
         await msg.edit_text(f"❌ کد اشتباه یا منقضی است:\n{response}\n\nمجدداً کد را ارسال کنید:")
         return ASK_OTP
@@ -338,11 +393,10 @@ async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     days = await db.get_expiry_days()
     session_token = secrets.token_urlsafe(14)
-    await db.save_session(session_token, result_json, days=days)
+    await db.save_session(session_token, result_json, days=days, phone=phone)
 
     login_url = f"{WEBHOOK_URL}/auth/{session_token}"
-    
-    # ذخیره و اعمال کسر از سهمیه
+
     await db.add_link_count(user_id)
     await db.add_log(user_id, phone)
     await db.save_user_created_link(user_id, phone, login_url, days)
@@ -362,7 +416,7 @@ async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ **اعتبار پیوند:** {days} روز ({'۱ ماه' if days == 30 else '۲ ماه'})\n"
         f"📊 **سهمیه باقیمانده:** {rem} لینک\n\n"
         f"🔗 **پیوند اختصاصی جهت ورود:**\n`{login_url}`\n\n"
-        f"*(پیوند بالا را در اپلیکیشن اختصاصی کپی و پیست کنید)*",
+        f"*(پیوند بالا را در اپلیکیشن اختصاصی وارد نمایید)*",
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
@@ -372,7 +426,7 @@ async def handle_action_choice(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    
+
     if query.data == "flow_next":
         used, max_l = await db.get_user_quota(user_id)
         if used >= max_l:
@@ -389,7 +443,7 @@ async def handle_action_choice(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="Markdown"
         )
         return ASK_PHONE
-        
+
     elif query.data == "flow_finish":
         context.user_data.clear()
         await query.message.reply_text(
@@ -405,16 +459,17 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= Admin Panel (Protected) =================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # کاملاً مخفی برای افراد غیر از ادمین
     if update.effective_user.id != ADMIN_ID:
         return
 
     days = await db.get_expiry_days()
     expiry_text = "۱ ماهه (۳۰ روز)" if days == 30 else "۲ ماهه (۶۰ روز)"
     default_l = await db.get_default_limit()
-    
+
     keyboard = [
         [InlineKeyboardButton("📊 آمار کلی ربات", callback_data="adm_stats")],
+        [InlineKeyboardButton("💾 استخراج کامل دیتابیس", callback_data="adm_export_db")],
+        [InlineKeyboardButton("🔍 دریافت JSON با شماره", callback_data="adm_get_json")],
         [InlineKeyboardButton(f"⏳ اعتبار پیش‌فرض: {expiry_text} (تغییر)", callback_data="adm_toggle_exp")],
         [InlineKeyboardButton(f"🌐 سهمیه پیش‌فرض: {default_l} لینک (تغییر)", callback_data="adm_set_def_limit")],
         [InlineKeyboardButton("⚙️ تنظیم سهمیه یک کاربر خاص", callback_data="adm_set_user_limit")],
@@ -425,32 +480,94 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if query.from_user.id != ADMIN_ID:
-        return
+        return ConversationHandler.END
     await query.answer()
-    
+
     if query.data == "adm_stats":
         total, banned, links = await db.get_stats()
-        await query.edit_message_text(f"📊 **آمار سیستم:**\n\n👥 کاربران: {total}\n🚫 مسدود شده‌ها: {banned}\n🔗 کل پیوندهای تولید شده: {links}", parse_mode="Markdown")
+        try:
+            await query.edit_message_text(
+                f"📊 **آمار سیستم:**\n\n👥 کاربران: {total}\n🚫 مسدود شده‌ها: {banned}\n🔗 کل پیوندهای تولید شده: {links}",
+                parse_mode="Markdown"
+            )
+        except BadRequest:
+            pass
+
+    elif query.data == "adm_export_db":
+        msg = await query.message.reply_text("⏳ در حال استخراج دیتابیس...")
+        try:
+            db_data = await db.export_full_db()
+            file_bytes = BytesIO(json.dumps(db_data, ensure_ascii=False, indent=2).encode('utf-8'))
+            file_bytes.name = f"backup_database_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
+
+            await context.bot.send_document(
+                chat_id=query.message.chat.id,
+                document=file_bytes,
+                caption=f"💾 **بکاپ کامل دیتابیس Redis**\n\n👥 کاربران: {len(db_data['users'])}\n📝 لاگ‌ها: {len(db_data['logs'])}\n🔑 نشست‌های فعال: {db_data['active_sessions_count']}",
+                parse_mode="Markdown"
+            )
+            await msg.delete()
+        except Exception as e:
+            await msg.edit_text(f"❌ خطا در استخراج دیتابیس: {e}")
+
+    elif query.data == "adm_get_json":
+        await query.message.reply_text("📱 لطفاً شماره موبایل مورد نظر را ارسال کنید:\n(مثال: 09123456789)\n\n🔙 لغو: /cancel")
+        return ADMIN_GET_JSON_PHONE
+
     elif query.data == "adm_toggle_exp":
         current = await db.get_expiry_days()
         new_days = 60 if current == 30 else 30
         await db.set_expiry_days(new_days)
         new_text = "۱ ماهه (۳۰ روز)" if new_days == 30 else "۲ ماهه (۶۰ روز)"
-        await query.edit_message_text(f"✅ اعتبار پیوندهای جدید به **{new_text}** تغییر یافت.", parse_mode="Markdown")
+        try:
+            await query.edit_message_text(f"✅ اعتبار پیوندهای جدید به **{new_text}** تغییر یافت.", parse_mode="Markdown")
+        except BadRequest:
+            pass
+
     elif query.data == "adm_set_def_limit":
-        await query.message.reply_text("🔢 سهمیه پیش‌فرض جدید برای تمام کاربران جدید را وارد کنید:")
+        await query.message.reply_text("🔢 سهمیه پیش‌فرض جدید را وارد کنید:\n(برای لغو: /cancel)")
         return ADMIN_SET_DEFAULT_LIMIT
+
     elif query.data == "adm_set_user_limit":
-        await query.message.reply_text("👤 آیدی عددی (Chat ID) کاربر را بفرستید:")
+        await query.message.reply_text("👤 آیدی عددی (Chat ID) کاربر را بفرستید:\n(برای لغو: /cancel)")
         return ADMIN_SET_USER_LIMIT_ID
+
     elif query.data == "adm_ban":
-        await query.message.reply_text("🚫 آیدی عددی کاربر برای مسدود شدن را بفرستید:")
+        await query.message.reply_text("🚫 آیدی عددی کاربر برای مسدود شدن را بفرستید:\n(برای لغو: /cancel)")
         return ADMIN_BAN
+
     elif query.data == "adm_unban":
-        await query.message.reply_text("✅ آیدی عددی کاربر برای رفع مسدودی را بفرستید:")
+        await query.message.reply_text("✅ آیدی عددی کاربر برای رفع مسدودی را بفرستید:\n(برای لغو: /cancel)")
         return ADMIN_UNBAN
 
-# هندلرهای تنظیمات ادمین
+async def adm_handle_get_json_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = update.message.text.strip()
+    if len(phone) != 11 or not phone.isdigit() or not phone.startswith("09"):
+        await update.message.reply_text("❌ شماره نامعتبر است. شماره ۱۱ رقمی با 09 وارد کنید:")
+        return ConversationHandler.END
+
+    msg = await update.message.reply_text("🔍 در حال جستجوی اکانت...")
+    session_data = await db.get_session_by_phone(phone)
+
+    if not session_data:
+        await msg.edit_text(f"❌ هیچ سشن فعالی برای شماره `{phone}` در دیتابیس یافت نشد.", parse_mode="Markdown")
+        return ConversationHandler.END
+
+    file_bytes = BytesIO(json.dumps(session_data, ensure_ascii=False, indent=2).encode('utf-8'))
+    file_bytes.name = f"jet_account_{phone}.json"
+
+    await msg.delete()
+    await update.message.reply_document(
+        document=file_bytes,
+        caption=(
+            f"✅ **اطلاعات نشست استخراج شد!**\n\n"
+            f"📱 شماره: `{phone}`\n"
+            f"🧩 این فایل را مستقیماً داخل افزونه وارد نمایید."
+        ),
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
 async def adm_save_default_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.isdigit():
@@ -485,13 +602,17 @@ async def adm_handle_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid.isdigit():
         await db.set_ban(int(uid), "1")
         await update.message.reply_text(f"✅ کاربر {uid} مسدود شد.")
+    else:
+        await update.message.reply_text("❌ آیدی نامعتبر است.")
     return ConversationHandler.END
 
 async def adm_handle_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.message.text.strip()
     if uid.isdigit():
         await db.set_ban(int(uid), "0")
-        await update.message.reply_text(f"✅ کاربر {uid} رفع مسدودی شد.")
+        await update.message.reply_text(f"✅ کاربر {uid} آزاد شد.")
+    else:
+        await update.message.reply_text("❌ آیدی نامعتبر است.")
     return ConversationHandler.END
 
 # ================= Secure Gateway Web Route =================
@@ -500,22 +621,17 @@ async def web_telegram_webhook(request: web.Request):
     try:
         data = await request.json()
         update = Update.de_json(data, app.bot)
-        await app.update_queue.put(update)
+        # پردازش همزمان و مستقیم آپدیت‌ها در پایتون تلگرام بات v20+
+        await app.process_update(update)
     except Exception as e:
         logger.error(f"Webhook Error: {e}")
     return web.Response(text="OK")
 
 async def web_secure_gateway(request: web.Request):
-    """
-    دروازه امن تحویل سشن:
-    - اگر از طریق مرورگر عادی باز شود: هیچ اطلاعاتی نمایش داده نمی‌شود.
-    - اگر از طریق اپلیکیشن درخواست داده شود: دیتای JSON تحویل داده می‌شود.
-    """
     token_key = request.match_info.get("token")
     session_data = await db.get_session(token_key)
 
     if not session_data:
-        # نمایش صفحه خطای رسمی بدون هیچ ردپایی
         html_not_found = """
         <!DOCTYPE html>
         <html dir="rtl" lang="fa">
@@ -527,16 +643,12 @@ async def web_secure_gateway(request: web.Request):
         """
         return web.Response(text=html_not_found, content_type="text/html", status=404)
 
-    # بررسی هدرهای کلاینت: آیا درخواست از اپلیکیشن است یا مرورگر؟
     user_agent = request.headers.get("User-Agent", "")
     app_header = request.headers.get("X-Client-App", "")
 
-    # اگر درخواست از اپلیکیشن رسمی ما باشد (ارسال دیتای JSON خالص)
     if app_header == APP_SECRET_HEADER or "JetAppClient" in user_agent:
         return web.json_response({"status": "success", "session": session_data})
 
-    # اگر کاربر لینک را در مرورگر (کروم، فایرفاکس، سافاری و...) باز کند:
-    # یک صفحه مسدودساز شیک بدون حتی ۱ بایت از اطلاعات سشن نمایش داده می‌شود
     html_browser_blocked = """
     <!DOCTYPE html>
     <html dir="rtl" lang="fa">
@@ -583,6 +695,7 @@ async def main():
             ADMIN_SET_DEFAULT_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_save_default_limit)],
             ADMIN_SET_USER_LIMIT_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_get_user_for_limit)],
             ADMIN_SET_USER_LIMIT_VAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_save_user_limit)],
+            ADMIN_GET_JSON_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_handle_get_json_phone)],
             ADMIN_BAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_handle_ban)],
             ADMIN_UNBAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_handle_unban)],
         },
