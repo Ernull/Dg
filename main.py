@@ -1,6 +1,7 @@
 """
 🚀 Advanced Digikala Jet Link Maker Bot & Secure API Gateway
 Fixed & Optimized for Production Deployment on Railway
+Features: Auto-Registration for New Users
 """
 
 import os
@@ -183,7 +184,7 @@ db = Database()
 class AsyncJetAuth:
     def __init__(self):
         self.client_id = "FINGERPRINTV2-6a44d158446867e4502af048b412cc7d"
-        self.timeout = aiohttp.ClientTimeout(total=12)
+        self.timeout = aiohttp.ClientTimeout(total=15)
         self.headers = {
             'Accept': 'application/json, text/plain, */*',
             'Content-Type': 'application/json',
@@ -220,6 +221,23 @@ class AsyncJetAuth:
                     return False, f"HTTP {res.status}"
             except Exception as e:
                 return False, str(e)
+
+    # تابع جدید برای ثبت‌نام خودکار اکانت‌های بدون نام
+    async def register_user(self, auth_token: str, first_name="کاربر", last_name="جت"):
+        url = "https://api.digikalajet.ir/user/registration-form/?ch=jj"
+        reg_headers = self.headers.copy()
+        reg_headers['Authorization'] = auth_token # ارسال دقیق توکن طبق فایل جیسون شما
+        reg_headers['X-Request-UUID'] = str(uuid.uuid4())
+        payload = {"first_name": first_name, "last_name": last_name}
+        
+        async with aiohttp.ClientSession(headers=reg_headers, timeout=self.timeout) as session:
+            try:
+                async with session.post(url, json=payload) as res:
+                    if res.status == 200:
+                        return True
+                    return False
+            except Exception:
+                return False
 
 def build_json(data: dict, phone: str):
     res_data = data.get("data", {})
@@ -378,17 +396,30 @@ async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ نشست منقضی شد. لطفاً از ابتدا اقدام کنید: /start")
         return ConversationHandler.END
 
-    msg = await update.message.reply_text("⏳ در حال ساخت پیوند...")
+    msg = await update.message.reply_text("⏳ در حال بررسی کد و لاگین...")
     jet = AsyncJetAuth()
-    success, response = await jet.confirm_phone(phone, code, otp_token)
+    success, response_data = await jet.confirm_phone(phone, code, otp_token)
 
     if not success:
-        await msg.edit_text(f"❌ کد اشتباه یا منقضی است:\n{response}\n\nمجدداً کد را ارسال کنید:")
+        await msg.edit_text(f"❌ کد اشتباه یا منقضی است:\n{response_data}\n\nمجدداً کد را ارسال کنید:")
         return ASK_OTP
 
-    result_json = build_json(response, phone)
+    # ============ منطق ثبت‌نام خودکار ============
+    res_data = response_data.get("data", {})
+    access_token = res_data.get("token", "")
+    is_new_user = res_data.get("is_new", False)
+
+    if is_new_user and access_token:
+        await msg.edit_text("⏳ حساب کاربری جدید یافت شد! در حال ثبت‌نام خودکار...")
+        reg_success = await jet.register_user(access_token)
+        if not reg_success:
+            await msg.edit_text("❌ خطا در ثبت‌نام خودکار حساب جدید. لطفاً بعداً تلاش کنید.")
+            return ConversationHandler.END
+        # اگر ثبت نام موفق بود، فرآیند را با همان توکن دریافتی ادامه می‌دهیم
+
+    result_json = build_json(response_data, phone)
     if not result_json:
-        await msg.edit_text("❌ خطایی رخ داد. شماره در دیجی‌کالا ثبت‌نام نشده است.")
+        await msg.edit_text("❌ خطایی در ساخت دیتای حساب رخ داد.")
         return ConversationHandler.END
 
     days = await db.get_expiry_days()
@@ -621,7 +652,6 @@ async def web_telegram_webhook(request: web.Request):
     try:
         data = await request.json()
         update = Update.de_json(data, app.bot)
-        # پردازش همزمان و مستقیم آپدیت‌ها در پایتون تلگرام بات v20+
         await app.process_update(update)
     except Exception as e:
         logger.error(f"Webhook Error: {e}")
