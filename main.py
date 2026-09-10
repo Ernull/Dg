@@ -1,6 +1,8 @@
 """
 🚀 Nexus Extractor - Cloud Bot & Secure Gateway
-Integrated with Hardware Modem Queue System
+- Auto-Registration
+- No Quota Limits
+- Admin Pause/Resume & DB Flush
 """
 
 import os
@@ -29,15 +31,8 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 APP_SECRET_HEADER = "JetApp-Secure-Client"
 
-# Conversation States (Only for Admin now, User flow is automated)
-(
-    ADMIN_BAN,
-    ADMIN_UNBAN,
-    ADMIN_SET_USER_LIMIT_ID,
-    ADMIN_SET_USER_LIMIT_VAL,
-    ADMIN_SET_DEFAULT_LIMIT,
-    ADMIN_GET_JSON_PHONE
-) = range(6)
+# Conversation States for Admin
+(ADMIN_BAN, ADMIN_UNBAN, ADMIN_GET_JSON_PHONE) = range(3)
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -49,13 +44,11 @@ class Database:
 
     async def init_user(self, user_id: int, first_name: str):
         if not await self.redis.exists(f"user:{user_id}"):
-            default_limit = await self.get_default_limit()
             await self.redis.hset(f"user:{user_id}", mapping={
                 "name": first_name,
                 "joined": datetime.now().isoformat(),
                 "banned": "0",
-                "links": "0",
-                "max_links": str(default_limit)
+                "links_created": "0"
             })
 
     async def is_banned(self, user_id: int) -> bool:
@@ -64,24 +57,20 @@ class Database:
     async def set_ban(self, user_id: int, status: str):
         await self.redis.hset(f"user:{user_id}", "banned", status)
 
-    async def get_user_quota(self, user_id: int):
-        used = int(await self.redis.hget(f"user:{user_id}", "links") or 0)
-        max_l = await self.redis.hget(f"user:{user_id}", "max_links")
-        max_links = int(max_l) if max_l else await self.get_default_limit()
-        return used, max_links
-
-    async def set_user_limit(self, user_id: int, limit: int):
-        await self.redis.hset(f"user:{user_id}", "max_links", str(limit))
-
-    async def get_default_limit(self) -> int:
-        val = await self.redis.get("config:default_limit")
-        return int(val) if val else 5
-
-    async def set_default_limit(self, limit: int):
-        await self.redis.set("config:default_limit", str(limit))
-
     async def add_link_count(self, user_id: int):
-        await self.redis.hincrby(f"user:{user_id}", "links", 1)
+        await self.redis.hincrby(f"user:{user_id}", "links_created", 1)
+        
+    async def get_user_total_links(self, user_id: int):
+        return int(await self.redis.hget(f"user:{user_id}", "links_created") or 0)
+
+    async def is_system_paused(self) -> bool:
+        return await self.redis.get("config:paused") == "1"
+
+    async def toggle_system_pause(self) -> bool:
+        current = await self.redis.get("config:paused")
+        new_val = "0" if current == "1" else "1"
+        await self.redis.set("config:paused", new_val)
+        return new_val == "1"
 
     async def add_log(self, user_id: int, phone: str):
         log = json.dumps({"uid": user_id, "phone": phone, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
@@ -136,13 +125,8 @@ class Database:
     async def export_full_db(self) -> dict:
         backup = {
             "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "configs": {
-                "expiry_days": await self.get_expiry_days(),
-                "default_limit": await self.get_default_limit()
-            },
-            "users": {},
-            "user_links": {},
-            "logs": [],
+            "configs": {"expiry_days": await self.get_expiry_days()},
+            "users": {}, "user_links": {}, "logs": [],
             "active_sessions_count": len(await self.redis.keys("jet_session:*"))
         }
         user_keys = await self.redis.keys("user:*")
@@ -158,17 +142,30 @@ class Database:
         backup["logs"] = [json.loads(x) for x in raw_logs]
         return backup
 
+    async def clear_operational_db(self):
+        # پاکسازی هوشمند: نشست‌ها، لاگ‌ها، پیوندها و صف تسک‌ها پاک می‌شوند اما اطلاعات کاربران مسدود شده می‌ماند
+        keys_to_delete = []
+        patterns = ["jet_session:*", "phone_session:*", "result:*", "user_links:*", "bot:tasks", "bot:logs"]
+        for p in patterns:
+            if "*" in p:
+                found = await self.redis.keys(p)
+                keys_to_delete.extend(found)
+            else:
+                keys_to_delete.append(p)
+        
+        if keys_to_delete:
+            await self.redis.delete(*keys_to_delete)
+        return len(keys_to_delete)
+
     async def get_stats(self):
         keys = await self.redis.keys("user:*")
         total = len(keys)
         banned = 0
-        links = 0
         for k in keys:
-            user_info = await self.redis.hmget(k, ["banned", "links"])
-            if user_info[0] == "1":
+            if await self.redis.hget(k, "banned") == "1":
                 banned += 1
-            links += int(user_info[1] or 0)
-        return total, banned, links
+        active_sessions = len(await self.redis.keys("jet_session:*"))
+        return total, banned, active_sessions
 
 db = Database()
 
@@ -180,9 +177,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await db.is_banned(user.id):
         return
 
-    used, max_l = await db.get_user_quota(user.id)
-    rem = max(0, max_l - used)
-
     keyboard = [
         [InlineKeyboardButton("🔗 استخراج و ساخت اکانت جدید", callback_data="btn_make_link")],
         [InlineKeyboardButton("📋 لینک‌های من", callback_data="btn_my_links"),
@@ -191,11 +185,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"سلام {user.first_name} عزیز 🛒\n\n"
-        f"به سیستم استخراج خودکار اکانت دیجی‌کالا جت خوش آمدید.\n"
-        f"🔹 سهمیه باقی‌مانده شما: **{rem}** از **{max_l}** لینک\n\n"
+        f"به سیستم استخراج خودکار اکانت دیجی‌کالا جت (Nexus Extractor) خوش آمدید.\n"
         f"جهت دریافت اکانت جدید، روی دکمه زیر کلیک کنید:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def user_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -207,27 +199,21 @@ async def user_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if query.data == "btn_make_link":
-        used, max_l = await db.get_user_quota(user_id)
-        if used >= max_l:
-            await query.message.reply_text(
-                f"❌ **سهمیه ساخت اکانت شما به اتمام رسیده است!** ({used}/{max_l})\n",
-                parse_mode="Markdown"
-            )
+        if await db.is_system_paused():
+            await query.message.reply_text("⛔️ **سیستم موقتاً متوقف شده است.**\n\nربات در حال حاضر در وضعیت سرویس (مثلاً تعویض سیم‌کارت‌ها) قرار دارد. لطفاً دقایقی دیگر تلاش کنید.", parse_mode="Markdown")
             return
 
         msg = await query.message.reply_text(
             "⏳ **در حال ارتباط با سرور مودم...**\n"
-            "ربات در حال استخراج یک شماره آزاد، ارسال پیامک و ساخت نشست اختصاصی است. این فرآیند ممکن است ۱ تا ۲ دقیقه زمان ببرد. لطفاً صبور باشید...",
+            "ربات در حال استخراج یک شماره آزاد و ساخت نشست اختصاصی است. لطفاً صبور باشید...",
             parse_mode="Markdown"
         )
 
-        # 1. Generate Task ID and Push to Queue
         task_id = str(uuid.uuid4())
         await db.redis.rpush("bot:tasks", task_id)
 
-        # 2. Wait for Bridge.py to process and return result
         result = None
-        for _ in range(60): # 120 seconds max timeout
+        for _ in range(60): # 120s timeout
             res_str = await db.redis.get(f"result:{task_id}")
             if res_str:
                 result = json.loads(res_str)
@@ -235,9 +221,8 @@ async def user_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 break
             await asyncio.sleep(2)
 
-        # 3. Handle Timeouts or Errors from Hardware Agent
         if not result:
-            await msg.edit_text("❌ تایم‌اوت! سرور مودم محلی پاسخ نداد یا در حال حاضر تمامی سیم‌کارت‌ها درگیر پردازش هستند. لطفاً چند دقیقه دیگر تلاش کنید.")
+            await msg.edit_text("❌ تایم‌اوت! سرور مودم پاسخ نداد یا تمامی سیم‌کارت‌ها درگیر هستند.")
             return
 
         if result.get("status") == "error":
@@ -245,7 +230,6 @@ async def user_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await msg.edit_text(f"❌ خطا در ساخت اکانت:\n{err_msg}")
             return
 
-        # 4. Process Successful Extraction
         phone = result["phone"]
         final_json = result["data"]
 
@@ -259,32 +243,26 @@ async def user_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await db.add_log(user_id, phone)
         await db.save_user_created_link(user_id, phone, login_url, days)
 
-        rem = max(0, max_l - used - 1)
-
         await msg.edit_text(
             f"🎉 **اکانت اختصاصی با موفقیت استخراج شد!**\n\n"
             f"📱 شماره لاگین شده: `{phone}`\n"
-            f"⏳ اعتبار پیوند: {days} روز\n"
-            f"📊 سهمیه باقیمانده شما: {rem} لینک\n\n"
+            f"⏳ اعتبار پیوند: {days} روز\n\n"
             f"🔗 **پیوند اختصاصی (جهت باز کردن در اپلیکیشن):**\n`{login_url}`\n\n",
             parse_mode="Markdown"
         )
 
     elif query.data == "btn_my_account":
-        used, max_l = await db.get_user_quota(user_id)
-        rem = max(0, max_l - used)
+        total_created = await db.get_user_total_links(user_id)
         await query.message.reply_text(
-            f"👤 **وضعیت اشتراک شما:**\n\n"
-            f"🔹 سهمیه کل: **{max_l}**\n"
-            f"🔹 استفاده شده: **{used}**\n"
-            f"🔹 سهمیه باقیمانده: **{rem}**",
+            f"👤 **وضعیت حساب شما:**\n\n"
+            f"🔹 تعداد کل اکانت‌های استخراج شده توسط شما: **{total_created}** عدد",
             parse_mode="Markdown"
         )
 
     elif query.data == "btn_my_links":
         links = await db.get_user_created_links(user_id)
         if not links:
-            await query.message.reply_text("❌ شما هنوز هیچ پیوندی ثبت نکرده‌اید.")
+            await query.message.reply_text("❌ شما هنوز هیچ پیوندی استخراج نکرده‌اید.")
             return
 
         text = "📋 **پیوندهای اخیر شما:**\n\n"
@@ -308,16 +286,17 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     days = await db.get_expiry_days()
     expiry_text = "۱ ماهه (۳۰ روز)" if days == 30 else "۲ ماهه (۶۰ روز)"
-    default_l = await db.get_default_limit()
+    
+    is_paused = await db.is_system_paused()
+    pause_btn_text = "▶️ شروع سیستم (Resume)" if is_paused else "⏸ توقف سیستم (Pause)"
 
     keyboard = [
-        [InlineKeyboardButton("📊 آمار کلی ربات", callback_data="adm_stats")],
+        [InlineKeyboardButton(pause_btn_text, callback_data="adm_toggle_pause")],
+        [InlineKeyboardButton("📊 آمار کلی ربات", callback_data="adm_stats"), InlineKeyboardButton("🧹 پاکسازی دیتابیس", callback_data="adm_clear_db")],
         [InlineKeyboardButton("💾 استخراج کامل دیتابیس", callback_data="adm_export_db")],
         [InlineKeyboardButton("🔍 دریافت JSON با شماره", callback_data="adm_get_json")],
-        [InlineKeyboardButton(f"⏳ اعتبار پیش‌فرض: {expiry_text} (تغییر)", callback_data="adm_toggle_exp")],
-        [InlineKeyboardButton(f"🌐 سهمیه پیش‌فرض: {default_l} لینک (تغییر)", callback_data="adm_set_def_limit")],
-        [InlineKeyboardButton("⚙️ تنظیم سهمیه یک کاربر خاص", callback_data="adm_set_user_limit")],
-        [InlineKeyboardButton("🚫 مسدود کردن کاربر", callback_data="adm_ban"), InlineKeyboardButton("✅ رفع مسدودی کاربر", callback_data="adm_unban")]
+        [InlineKeyboardButton(f"⏳ اعتبار پیوندها: {expiry_text} (تغییر)", callback_data="adm_toggle_exp")],
+        [InlineKeyboardButton("🚫 مسدود کردن", callback_data="adm_ban"), InlineKeyboardButton("✅ رفع مسدودی", callback_data="adm_unban")]
     ]
     await update.message.reply_text("⚙️ **پنل مدیریت پیشرفته ربات:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -327,11 +306,21 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     await query.answer()
 
-    if query.data == "adm_stats":
-        total, banned, links = await db.get_stats()
+    if query.data == "adm_toggle_pause":
+        is_paused = await db.toggle_system_pause()
+        status = "🛑 متوقف" if is_paused else "✅ فعال"
+        await query.message.reply_text(f"وضعیت درخواست‌های سیستم تغییر کرد.\nوضعیت فعلی: **{status}**", parse_mode="Markdown")
+        await admin_panel(update, context) # Refresh Panel
+
+    elif query.data == "adm_clear_db":
+        deleted_count = await db.clear_operational_db()
+        await query.message.reply_text(f"🧹 **عملیات پاکسازی با موفقیت انجام شد.**\n\nتعداد `{deleted_count}` رکورد (شامل پیوندها، نشست‌ها و لاگ‌ها) پاکسازی شدند. کاربران و مسدودی‌ها حفظ شدند.", parse_mode="Markdown")
+
+    elif query.data == "adm_stats":
+        total, banned, active = await db.get_stats()
         try:
             await query.edit_message_text(
-                f"📊 **آمار سیستم:**\n\n👥 کاربران: {total}\n🚫 مسدود شده‌ها: {banned}\n🔗 کل پیوندهای تولید شده: {links}",
+                f"📊 **آمار سیستم:**\n\n👥 کل کاربران: {total}\n🚫 مسدود شده‌ها: {banned}\n🔗 سشن‌های فعال: {active}",
                 parse_mode="Markdown"
             )
         except BadRequest:
@@ -347,7 +336,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_document(
                 chat_id=query.message.chat.id,
                 document=file_bytes,
-                caption=f"💾 **بکاپ کامل دیتابیس Redis**\n\n👥 کاربران: {len(db_data['users'])}\n📝 لاگ‌ها: {len(db_data['logs'])}\n🔑 نشست‌های فعال: {db_data['active_sessions_count']}",
+                caption=f"💾 **بکاپ کامل دیتابیس Redis**\n\n👥 کاربران: {len(db_data['users'])}\n📝 لاگ‌ها: {len(db_data['logs'])}",
                 parse_mode="Markdown"
             )
             await msg.delete()
@@ -367,14 +356,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"✅ اعتبار پیوندهای جدید به **{new_text}** تغییر یافت.", parse_mode="Markdown")
         except BadRequest:
             pass
-
-    elif query.data == "adm_set_def_limit":
-        await query.message.reply_text("🔢 سهمیه پیش‌فرض جدید را وارد کنید:\n(برای لغو: /cancel)")
-        return ADMIN_SET_DEFAULT_LIMIT
-
-    elif query.data == "adm_set_user_limit":
-        await query.message.reply_text("👤 آیدی عددی (Chat ID) کاربر را بفرستید:\n(برای لغو: /cancel)")
-        return ADMIN_SET_USER_LIMIT_ID
 
     elif query.data == "adm_ban":
         await query.message.reply_text("🚫 آیدی عددی کاربر برای مسدود شدن را بفرستید:\n(برای لغو: /cancel)")
@@ -402,30 +383,6 @@ async def adm_handle_get_json_phone(update: Update, context: ContextTypes.DEFAUL
         caption=f"✅ **اطلاعات نشست استخراج شد!**\n\n📱 شماره: `{phone}`",
         parse_mode="Markdown"
     )
-    return ConversationHandler.END
-
-async def adm_save_default_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text.isdigit():
-        await db.set_default_limit(int(text))
-        await update.message.reply_text(f"✅ سهمیه پیش‌فرض به {text} تغییر یافت.")
-    return ConversationHandler.END
-
-async def adm_get_user_for_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text.isdigit():
-        context.user_data['target_uid'] = text
-        await update.message.reply_text(f"🔢 سقف لینک مجاز برای کاربر {text} را وارد کنید:")
-        return ADMIN_SET_USER_LIMIT_VAL
-    return ConversationHandler.END
-
-async def adm_save_user_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    val = update.message.text.strip()
-    uid = context.user_data.get('target_uid')
-    if val.isdigit() and uid:
-        await db.set_user_limit(int(uid), int(val))
-        await update.message.reply_text(f"✅ سقف لینک کاربر {uid} به {val} تغییر کرد.")
-    context.user_data.clear()
     return ConversationHandler.END
 
 async def adm_handle_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -494,9 +451,6 @@ async def main():
     admin_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback, pattern="^adm_")],
         states={
-            ADMIN_SET_DEFAULT_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_save_default_limit)],
-            ADMIN_SET_USER_LIMIT_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_get_user_for_limit)],
-            ADMIN_SET_USER_LIMIT_VAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_save_user_limit)],
             ADMIN_GET_JSON_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_handle_get_json_phone)],
             ADMIN_BAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_handle_ban)],
             ADMIN_UNBAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, adm_handle_unban)],
@@ -507,8 +461,6 @@ async def main():
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("admin", admin_panel))
     bot_app.add_handler(admin_conv)
-    
-    # Handlers User Clicks directly (No conversation needed anymore)
     bot_app.add_handler(CallbackQueryHandler(user_menu_callback, pattern="^btn_"))
 
     web_app = web.Application()
@@ -527,7 +479,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logger.info(f"🚀 Combined Cloud Server started on port {PORT}")
+    logger.info(f"🚀 Cloud Server started on port {PORT}")
 
     try:
         await asyncio.Event().wait()
