@@ -1,8 +1,8 @@
 """
 🚀 Nexus Extractor - Cloud Bot & Secure Gateway
 - Auto-Registration
-- No Quota Limits
 - Admin Pause/Resume & DB Flush
+- System Error Logs Viewer Added
 """
 
 import os
@@ -31,7 +31,6 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 APP_SECRET_HEADER = "JetApp-Secure-Client"
 
-# Conversation States for Admin
 (ADMIN_BAN, ADMIN_UNBAN, ADMIN_GET_JSON_PHONE) = range(3)
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -72,16 +71,10 @@ class Database:
         await self.redis.set("config:paused", new_val)
         return new_val == "1"
 
-    async def add_log(self, user_id: int, phone: str):
-        log = json.dumps({"uid": user_id, "phone": phone, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
-        await self.redis.rpush("bot:logs", log)
-
     async def save_user_created_link(self, user_id: int, phone: str, url: str, days: int):
         expire_date = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
         link_data = json.dumps({
-            "phone": phone,
-            "url": url,
-            "expire": expire_date,
+            "phone": phone, "url": url, "expire": expire_date,
             "created": datetime.now().strftime("%Y-%m-%d %H:%M")
         }, ensure_ascii=False)
         await self.redis.rpush(f"user_links:{user_id}", link_data)
@@ -122,11 +115,19 @@ class Database:
                     pass
         return None
 
+    # ====== توابع جدید برای لاگ خطا ======
+    async def get_recent_errors(self, limit=5):
+        errors = await self.redis.lrange("bot:admin_errors", -limit, -1)
+        return [json.loads(e) for e in reversed(errors)]
+    
+    async def clear_errors(self):
+        await self.redis.delete("bot:admin_errors")
+
     async def export_full_db(self) -> dict:
         backup = {
             "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "configs": {"expiry_days": await self.get_expiry_days()},
-            "users": {}, "user_links": {}, "logs": [],
+            "users": {}, "user_links": {},
             "active_sessions_count": len(await self.redis.keys("jet_session:*"))
         }
         user_keys = await self.redis.keys("user:*")
@@ -138,21 +139,17 @@ class Database:
             uid = lk.split(":")[1]
             items = await self.redis.lrange(lk, 0, -1)
             backup["user_links"][uid] = [json.loads(x) for x in items]
-        raw_logs = await self.redis.lrange("bot:logs", 0, -1)
-        backup["logs"] = [json.loads(x) for x in raw_logs]
         return backup
 
     async def clear_operational_db(self):
-        # پاکسازی هوشمند: نشست‌ها، لاگ‌ها، پیوندها و صف تسک‌ها پاک می‌شوند اما اطلاعات کاربران مسدود شده می‌ماند
         keys_to_delete = []
-        patterns = ["jet_session:*", "phone_session:*", "result:*", "user_links:*", "bot:tasks", "bot:logs"]
+        patterns = ["jet_session:*", "phone_session:*", "result:*", "user_links:*", "bot:tasks", "bot:admin_errors"]
         for p in patterns:
             if "*" in p:
                 found = await self.redis.keys(p)
                 keys_to_delete.extend(found)
             else:
                 keys_to_delete.append(p)
-        
         if keys_to_delete:
             await self.redis.delete(*keys_to_delete)
         return len(keys_to_delete)
@@ -173,19 +170,16 @@ db = Database()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await db.init_user(user.id, user.first_name or "کاربر")
-
     if await db.is_banned(user.id):
         return
 
     keyboard = [
-        [InlineKeyboardButton("🔗 استخراج و ساخت اکانت جدید", callback_data="btn_make_link")],
-        [InlineKeyboardButton("📋 لینک‌های من", callback_data="btn_my_links"),
-         InlineKeyboardButton("👤 حساب کاربری", callback_data="btn_my_account")]
+        [InlineKeyboardButton("🔗 استخراج اکانت جدید", callback_data="btn_make_link")],
+        [InlineKeyboardButton("📋 لینک‌های من", callback_data="btn_my_links"), InlineKeyboardButton("👤 پروفایل", callback_data="btn_my_account")]
     ]
-
     await update.message.reply_text(
         f"سلام {user.first_name} عزیز 🛒\n\n"
-        f"به سیستم استخراج خودکار اکانت دیجی‌کالا جت (Nexus Extractor) خوش آمدید.\n"
+        f"به سیستم استخراج خودکار اکانت دیجی‌کالا جت خوش آمدید.\n"
         f"جهت دریافت اکانت جدید، روی دکمه زیر کلیک کنید:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -200,14 +194,10 @@ async def user_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if query.data == "btn_make_link":
         if await db.is_system_paused():
-            await query.message.reply_text("⛔️ **سیستم موقتاً متوقف شده است.**\n\nربات در حال حاضر در وضعیت سرویس (مثلاً تعویض سیم‌کارت‌ها) قرار دارد. لطفاً دقایقی دیگر تلاش کنید.", parse_mode="Markdown")
+            await query.message.reply_text("⛔️ **سیستم موقتاً متوقف شده است.**\n\nسیستم در حال سرویس است. لطفاً دقایقی دیگر تلاش کنید.", parse_mode="Markdown")
             return
 
-        msg = await query.message.reply_text(
-            "⏳ **در حال ارتباط با سرور مودم...**\n"
-            "ربات در حال استخراج یک شماره آزاد و ساخت نشست اختصاصی است. لطفاً صبور باشید...",
-            parse_mode="Markdown"
-        )
+        msg = await query.message.reply_text("⏳ **در حال ارتباط با سرور مودم...**\nمنتظر استخراج شماره آزاد و دریافت پیامک...", parse_mode="Markdown")
 
         task_id = str(uuid.uuid4())
         await db.redis.rpush("bot:tasks", task_id)
@@ -222,12 +212,12 @@ async def user_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await asyncio.sleep(2)
 
         if not result:
-            await msg.edit_text("❌ تایم‌اوت! سرور مودم پاسخ نداد یا تمامی سیم‌کارت‌ها درگیر هستند.")
+            await msg.edit_text("❌ تایم‌اوت! سرور مودم پاسخ نداد.")
             return
 
         if result.get("status") == "error":
             err_msg = result.get("msg", "خطای نامشخص در سیستم محلی")
-            await msg.edit_text(f"❌ خطا در ساخت اکانت:\n{err_msg}")
+            await msg.edit_text(f"❌ خطا:\n{err_msg}")
             return
 
         phone = result["phone"]
@@ -240,65 +230,53 @@ async def user_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         login_url = f"{WEBHOOK_URL}/auth/{session_token}"
 
         await db.add_link_count(user_id)
-        await db.add_log(user_id, phone)
         await db.save_user_created_link(user_id, phone, login_url, days)
 
         await msg.edit_text(
-            f"🎉 **اکانت اختصاصی با موفقیت استخراج شد!**\n\n"
-            f"📱 شماره لاگین شده: `{phone}`\n"
-            f"⏳ اعتبار پیوند: {days} روز\n\n"
-            f"🔗 **پیوند اختصاصی (جهت باز کردن در اپلیکیشن):**\n`{login_url}`\n\n",
-            parse_mode="Markdown"
+            f"🎉 **اکانت با موفقیت استخراج شد!**\n\n"
+            f"📱 شماره: `{phone}`\n"
+            f"⏳ اعتبار: {days} روز\n\n"
+            f"🔗 **لینک ورود:**\n`{login_url}`\n\n", parse_mode="Markdown"
         )
 
     elif query.data == "btn_my_account":
         total_created = await db.get_user_total_links(user_id)
-        await query.message.reply_text(
-            f"👤 **وضعیت حساب شما:**\n\n"
-            f"🔹 تعداد کل اکانت‌های استخراج شده توسط شما: **{total_created}** عدد",
-            parse_mode="Markdown"
-        )
+        await query.message.reply_text(f"👤 **تعداد کل اکانت‌های شما:** **{total_created}** عدد", parse_mode="Markdown")
 
     elif query.data == "btn_my_links":
         links = await db.get_user_created_links(user_id)
         if not links:
-            await query.message.reply_text("❌ شما هنوز هیچ پیوندی استخراج نکرده‌اید.")
+            await query.message.reply_text("❌ شما هنوز هیچ اکانتی ندارید.")
             return
-
         text = "📋 **پیوندهای اخیر شما:**\n\n"
         for idx, item in enumerate(reversed(links[-10:]), 1):
-            text += f"{idx}. شماره: `{item['phone']}`\n"
-            text += f"🔗 پیوند: `{item['url']}`\n"
-            text += f"⏳ انقضا: `{item['expire']}`\n"
-            text += "──────────────────\n"
-
+            text += f"{idx}. شماره: `{item['phone']}`\n🔗 پیوند: `{item['url']}`\n──────────────────\n"
         await query.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("❌ عملیات لغو شد. برای شروع: /start")
+    await update.message.reply_text("❌ لغو شد.")
     return ConversationHandler.END
 
-# ================= Admin Panel (Protected) =================
+# ================= Admin Panel =================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
     days = await db.get_expiry_days()
-    expiry_text = "۱ ماهه (۳۰ روز)" if days == 30 else "۲ ماهه (۶۰ روز)"
-    
+    expiry_text = "۱ ماهه" if days == 30 else "۲ ماهه"
     is_paused = await db.is_system_paused()
-    pause_btn_text = "▶️ شروع سیستم (Resume)" if is_paused else "⏸ توقف سیستم (Pause)"
+    pause_btn_text = "▶️ شروع سیستم" if is_paused else "⏸ توقف موقت"
 
     keyboard = [
         [InlineKeyboardButton(pause_btn_text, callback_data="adm_toggle_pause")],
-        [InlineKeyboardButton("📊 آمار کلی ربات", callback_data="adm_stats"), InlineKeyboardButton("🧹 پاکسازی دیتابیس", callback_data="adm_clear_db")],
-        [InlineKeyboardButton("💾 استخراج کامل دیتابیس", callback_data="adm_export_db")],
-        [InlineKeyboardButton("🔍 دریافت JSON با شماره", callback_data="adm_get_json")],
-        [InlineKeyboardButton(f"⏳ اعتبار پیوندها: {expiry_text} (تغییر)", callback_data="adm_toggle_exp")],
+        [InlineKeyboardButton("🚨 مشاهده لاگ خطاها", callback_data="adm_view_errors")],
+        [InlineKeyboardButton("📊 آمار کلی", callback_data="adm_stats"), InlineKeyboardButton("🧹 پاکسازی DB", callback_data="adm_clear_db")],
+        [InlineKeyboardButton("💾 استخراج بکاپ", callback_data="adm_export_db"), InlineKeyboardButton("🔍 دریافت JSON", callback_data="adm_get_json")],
+        [InlineKeyboardButton(f"⏳ اعتبار پیوندها: {expiry_text}", callback_data="adm_toggle_exp")],
         [InlineKeyboardButton("🚫 مسدود کردن", callback_data="adm_ban"), InlineKeyboardButton("✅ رفع مسدودی", callback_data="adm_unban")]
     ]
-    await update.message.reply_text("⚙️ **پنل مدیریت پیشرفته ربات:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await update.message.reply_text("⚙️ **پنل مدیریت ربات:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -308,95 +286,87 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "adm_toggle_pause":
         is_paused = await db.toggle_system_pause()
-        status = "🛑 متوقف" if is_paused else "✅ فعال"
-        await query.message.reply_text(f"وضعیت درخواست‌های سیستم تغییر کرد.\nوضعیت فعلی: **{status}**", parse_mode="Markdown")
-        await admin_panel(update, context) # Refresh Panel
+        await query.message.reply_text(f"سیستم {'🛑 متوقف' if is_paused else '✅ فعال'} شد.", parse_mode="Markdown")
+        await admin_panel(update, context)
 
     elif query.data == "adm_clear_db":
-        deleted_count = await db.clear_operational_db()
-        await query.message.reply_text(f"🧹 **عملیات پاکسازی با موفقیت انجام شد.**\n\nتعداد `{deleted_count}` رکورد (شامل پیوندها، نشست‌ها و لاگ‌ها) پاکسازی شدند. کاربران و مسدودی‌ها حفظ شدند.", parse_mode="Markdown")
+        deleted = await db.clear_operational_db()
+        await query.message.reply_text(f"🧹 `{deleted}` رکورد (سشن، خطا، صف) پاکسازی شد.", parse_mode="Markdown")
+
+    elif query.data == "adm_view_errors":
+        errors = await db.get_recent_errors(5)
+        if not errors:
+            await query.message.reply_text("✅ سیستم در حال حاضر هیچ خطایی ندارد.")
+            return
+        
+        text = "🚨 **۵ خطای اخیر سیستم محلی:**\n\n"
+        for i, err in enumerate(errors, 1):
+            text += f"*{i}. زمان:* {err['time']}\n"
+            text += f"*📱 شماره:* `{err['phone']}`\n"
+            text += f"*⚠️ نوع خطا:* {err['error_type']}\n"
+            text += f"*📝 شرح:* `{err['details']}`\n"
+            text += "────────────────\n"
+        
+        kb = [[InlineKeyboardButton("🗑 پاکسازی لیست خطاها", callback_data="adm_clear_errors")]]
+        await query.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data == "adm_clear_errors":
+        await db.clear_errors()
+        await query.edit_message_text("✅ لیست خطاها با موفقیت پاکسازی شد.")
 
     elif query.data == "adm_stats":
         total, banned, active = await db.get_stats()
         try:
-            await query.edit_message_text(
-                f"📊 **آمار سیستم:**\n\n👥 کل کاربران: {total}\n🚫 مسدود شده‌ها: {banned}\n🔗 سشن‌های فعال: {active}",
-                parse_mode="Markdown"
-            )
+            await query.edit_message_text(f"📊 **آمار:**\n👥 کاربران: {total}\n🚫 مسدود: {banned}\n🔗 سشن‌های فعال: {active}", parse_mode="Markdown")
         except BadRequest:
             pass
 
     elif query.data == "adm_export_db":
-        msg = await query.message.reply_text("⏳ در حال استخراج دیتابیس...")
-        try:
-            db_data = await db.export_full_db()
-            file_bytes = BytesIO(json.dumps(db_data, ensure_ascii=False, indent=2).encode('utf-8'))
-            file_bytes.name = f"backup_database_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
-
-            await context.bot.send_document(
-                chat_id=query.message.chat.id,
-                document=file_bytes,
-                caption=f"💾 **بکاپ کامل دیتابیس Redis**\n\n👥 کاربران: {len(db_data['users'])}\n📝 لاگ‌ها: {len(db_data['logs'])}",
-                parse_mode="Markdown"
-            )
-            await msg.delete()
-        except Exception as e:
-            await msg.edit_text(f"❌ خطا در استخراج دیتابیس: {e}")
+        msg = await query.message.reply_text("⏳ در حال استخراج...")
+        db_data = await db.export_full_db()
+        file_bytes = BytesIO(json.dumps(db_data, ensure_ascii=False, indent=2).encode('utf-8'))
+        file_bytes.name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json"
+        await context.bot.send_document(chat_id=query.message.chat.id, document=file_bytes)
+        await msg.delete()
 
     elif query.data == "adm_get_json":
-        await query.message.reply_text("📱 لطفاً شماره موبایل مورد نظر را ارسال کنید:\n(مثال: 09123456789)\n\n🔙 لغو: /cancel")
+        await query.message.reply_text("📱 شماره موبایل را ارسال کنید:")
         return ADMIN_GET_JSON_PHONE
 
     elif query.data == "adm_toggle_exp":
-        current = await db.get_expiry_days()
-        new_days = 60 if current == 30 else 30
+        new_days = 60 if await db.get_expiry_days() == 30 else 30
         await db.set_expiry_days(new_days)
-        new_text = "۱ ماهه (۳۰ روز)" if new_days == 30 else "۲ ماهه (۶۰ روز)"
         try:
-            await query.edit_message_text(f"✅ اعتبار پیوندهای جدید به **{new_text}** تغییر یافت.", parse_mode="Markdown")
-        except BadRequest:
-            pass
+            await query.edit_message_text(f"✅ اعتبار پیوندها تغییر یافت.", parse_mode="Markdown")
+        except BadRequest: pass
 
     elif query.data == "adm_ban":
-        await query.message.reply_text("🚫 آیدی عددی کاربر برای مسدود شدن را بفرستید:\n(برای لغو: /cancel)")
+        await query.message.reply_text("🚫 آیدی کاربر برای مسدودی:")
         return ADMIN_BAN
 
     elif query.data == "adm_unban":
-        await query.message.reply_text("✅ آیدی عددی کاربر برای رفع مسدودی را بفرستید:\n(برای لغو: /cancel)")
+        await query.message.reply_text("✅ آیدی کاربر برای رفع مسدودی:")
         return ADMIN_UNBAN
 
 async def adm_handle_get_json_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text.strip()
-    msg = await update.message.reply_text("🔍 در حال جستجوی اکانت...")
     session_data = await db.get_session_by_phone(phone)
-
     if not session_data:
-        await msg.edit_text(f"❌ هیچ سشن فعالی برای شماره `{phone}` یافت نشد.", parse_mode="Markdown")
+        await update.message.reply_text("❌ یافت نشد.")
         return ConversationHandler.END
-
     file_bytes = BytesIO(json.dumps(session_data, ensure_ascii=False, indent=2).encode('utf-8'))
-    file_bytes.name = f"jet_account_{phone}.json"
-
-    await msg.delete()
-    await update.message.reply_document(
-        document=file_bytes,
-        caption=f"✅ **اطلاعات نشست استخراج شد!**\n\n📱 شماره: `{phone}`",
-        parse_mode="Markdown"
-    )
+    file_bytes.name = f"jet_{phone}.json"
+    await update.message.reply_document(document=file_bytes)
     return ConversationHandler.END
 
 async def adm_handle_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.message.text.strip()
-    if uid.isdigit():
-        await db.set_ban(int(uid), "1")
-        await update.message.reply_text(f"✅ کاربر {uid} مسدود شد.")
+    await db.set_ban(int(update.message.text.strip()), "1")
+    await update.message.reply_text("✅ مسدود شد.")
     return ConversationHandler.END
 
 async def adm_handle_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.message.text.strip()
-    if uid.isdigit():
-        await db.set_ban(int(uid), "0")
-        await update.message.reply_text(f"✅ کاربر {uid} آزاد شد.")
+    await db.set_ban(int(update.message.text.strip()), "0")
+    await update.message.reply_text("✅ رفع مسدودی شد.")
     return ConversationHandler.END
 
 # ================= Secure Gateway Web Route =================
@@ -406,43 +376,22 @@ async def web_telegram_webhook(request: web.Request):
         data = await request.json()
         update = Update.de_json(data, app.bot)
         await app.process_update(update)
-    except Exception as e:
-        logger.error(f"Webhook Error: {e}")
+    except Exception:
+        pass
     return web.Response(text="OK")
 
 async def web_secure_gateway(request: web.Request):
     token_key = request.match_info.get("token")
     session_data = await db.get_session(token_key)
-
     if not session_data:
-        html_not_found = """
-        <!DOCTYPE html>
-        <html dir="rtl" lang="fa">
-        <head><meta charset="UTF-8"><title>پیوند نامعتبر</title>
-        <style>body{font-family:Tahoma,sans-serif;background:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}
-        .card{background:#fff;padding:35px;border-radius:14px;box-shadow:0 4px 20px rgba(0,0,0,0.06);text-align:center;max-width:380px;border:1px solid #e2e8f0;}
-        h3{color:#e11d48;margin-top:0;}p{color:#64748b;font-size:14px;line-height:1.7;}</style></head>
-        <body><div class="card"><h3>پیوند منقضی یا نامعتبر است</h3><p>این پیوند در سیستم یافت نشد یا مدت اعتبار آن به پایان رسیده است.</p></div></body></html>
-        """
-        return web.Response(text=html_not_found, content_type="text/html", status=404)
+        return web.Response(text="Not Found", status=404)
 
     user_agent = request.headers.get("User-Agent", "")
     app_header = request.headers.get("X-Client-App", "")
-
     if app_header == APP_SECRET_HEADER or "JetAppClient" in user_agent:
         return web.json_response({"status": "success", "session": session_data})
 
-    html_browser_blocked = """
-    <!DOCTYPE html>
-    <html dir="rtl" lang="fa">
-    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>دسترسی فقط از طریق اپلیکیشن</title>
-    <style>body { font-family: Tahoma, -apple-system, sans-serif; background-color: #f1f5f9; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .box { background: #ffffff; padding: 35px 25px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.05); text-align: center; max-width: 400px; width: 85%; }
-    .icon { font-size: 45px; margin-bottom: 15px; } h3 { color: #0f172a; margin: 0 0 12px; font-size: 17px; } p { color: #64748b; font-size: 14px; line-height: 1.7; margin: 0; }</style>
-    </head>
-    <body><div class="box"><div class="icon">🔒</div><h3>دسترسی مستقیم مسدود است</h3><p>این پیوند صرفاً برای اجرا در <b>اپلیکیشن اختصاصی</b> طراحی شده است و امکان مشاهده مستقیم آن در مرورگر وجود ندارد.</p></div></body></html>
-    """
-    return web.Response(text=html_browser_blocked, content_type="text/html")
+    return web.Response(text="دسترسی فقط از اپلیکیشن مجاز است.", content_type="text/plain;charset=utf-8")
 
 # ================= Runner =================
 async def main():
