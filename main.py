@@ -1,7 +1,7 @@
 """
-🚀 Nexus Extractor - ADMIN AUTOMATION & WEB SERVER
+🚀 Nexus Extractor - ADMIN AUTOMATION & SECURE TOKEN GENERATOR
 """
-import os, json, asyncio, logging
+import os, json, asyncio, logging, secrets
 from io import BytesIO
 from datetime import datetime
 from aiohttp import web
@@ -34,7 +34,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📦 خروجی دیتابیس JSON", callback_data="adm_export_all")],
         [InlineKeyboardButton("🧹 فرمت شماره‌های تکراری", callback_data="adm_clear_history")]
     ]
-    text = "⚙️ **پنل اتوماسیون و درگاه لینک‌ساز:**\n\nسرور وب فعال است. پس از پایان استخراج، فایل لینک‌ها را دریافت کنید."
+    text = "⚙️ **پنل اتوماسیون مرکزی:**\n\nتولید لینک‌ها به صورت کاملاً ایزوله در این سرور انجام می‌شود."
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else:
@@ -47,10 +47,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "adm_start_bulk":
         await db.rpush("bot:admin_commands", "START_BULK")
-        await query.message.reply_text("🚀 عملیات رگباری آغاز شد. منتظر دریافت گزارش از سیستم محلی باشید...", parse_mode="Markdown")
+        await query.message.reply_text("🚀 عملیات رگباری آغاز شد. منتظر دریافت گزارش باشید...", parse_mode="Markdown")
 
     elif query.data == "adm_export_links":
-        msg = await query.message.reply_text("⏳ در حال ساخت فایل لینک‌ها...")
+        msg = await query.message.reply_text("⏳ در حال جمع‌آوری لینک‌ها...")
         records = await db.hgetall("jet:bulk_accounts")
         if not records:
             await msg.edit_text("❌ هیچ لینکی در سیستم موجود نیست.")
@@ -83,7 +83,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "adm_clear_history":
         await db.delete("jet:processed_phones")
         await db.delete("jet:bulk_accounts")
-        await query.message.reply_text("🧹 حافظه شماره‌های تکراری و لینک‌ها برای دوره جدید پاک شد.")
+        await query.message.reply_text("🧹 حافظه شماره‌های تکراری و لینک‌ها پاک شد.")
 
 async def alert_listener(app: Application):
     while True:
@@ -94,6 +94,26 @@ async def alert_listener(app: Application):
         except Exception:
             pass
         await asyncio.sleep(2)
+
+async def token_generator_worker():
+    """تولید توکن و لینک در سرور ابری (کاملاً ایزوله از سیستم محلی)"""
+    while True:
+        try:
+            raw_data = await db.lpop("bot:new_accounts")
+            if raw_data:
+                acc = json.loads(raw_data)
+                phone, name, final_json = acc["phone"], acc["name"], acc["data"]
+                
+                # تولید توکن فقط در سرور Railway
+                session_token = secrets.token_urlsafe(14)
+                
+                # ذخیره سشن و توکن
+                await db.setex(f"jet_session:{session_token}", 30 * 24 * 3600, json.dumps(final_json, ensure_ascii=False))
+                record = {"phone": phone, "token": session_token, "name": name}
+                await db.hset("jet:bulk_accounts", phone, json.dumps(record, ensure_ascii=False))
+        except Exception:
+            pass
+        await asyncio.sleep(1)
 
 # ================= Secure Gateway Web Route =================
 async def web_telegram_webhook(request: web.Request):
@@ -139,7 +159,9 @@ async def main():
     webhook_endpoint = f"{WEBHOOK_URL}/webhook/{TOKEN}"
     await bot_app.bot.set_webhook(url=webhook_endpoint)
     
+    # اجرای همزمان دریافت آلارم و تولید توکن در بک‌گراند
     asyncio.create_task(alert_listener(bot_app))
+    asyncio.create_task(token_generator_worker())
     
     runner = web.AppRunner(web_app)
     await runner.setup()
