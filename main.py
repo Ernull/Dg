@@ -1,5 +1,5 @@
 """
-🚀 Nexus Extractor - ADMIN AUTOMATION
+🚀 Nexus Extractor - ADMIN AUTOMATION & LIVE ALERTS
 """
 import os, json, asyncio, logging
 from io import BytesIO
@@ -18,7 +18,6 @@ logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔️ این ربات به حالت تمام خودکار درآمده و فقط برای ادمین در دسترس است.")
         return
     await admin_panel(update, context)
 
@@ -26,12 +25,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     
     keyboard = [
-        [InlineKeyboardButton("▶️ شروع ثبت‌نام خودکار (تمام مودم)", callback_data="adm_start_bulk")],
+        [InlineKeyboardButton("▶️ شروع استخراج رگباری (کل مودم)", callback_data="adm_start_bulk")],
         [InlineKeyboardButton("📦 خروجی یکجای تمام اکانت‌ها (JSON)", callback_data="adm_export_all")],
-        [InlineKeyboardButton("📋 مشاهده وضعیت و لاگ‌ها", callback_data="adm_view_logs")],
         [InlineKeyboardButton("🧹 پاکسازی لیست تکراری‌ها", callback_data="adm_clear_history")]
     ]
-    text = "⚙️ **پنل مدیریت اتوماسیون جت:**\n\nبا فشردن دکمه استارت، سیستم خودش شماره‌ها را خوانده و با رعایت پروکسی اکانت‌ها را می‌سازد."
+    text = "⚙️ **پنل مدیریت اتوماسیون جت:**\n\nآماده دریافت دستور. گزارشات به صورت خودکار همینجا ارسال خواهند شد."
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else:
@@ -44,10 +42,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "adm_start_bulk":
         await db.rpush("bot:admin_commands", "START_BULK")
-        await query.message.reply_text("🚀 دستور **اجرای خودکار** به سرور مودم ارسال شد.\nلطفاً از بخش لاگ‌ها وضعیت را بررسی کنید.", parse_mode="Markdown")
+        await query.message.reply_text("🚀 فرمان رگباری ارسال شد. منتظر دریافت گزارش اولیه از سیستم آقای بیگی باشید...", parse_mode="Markdown")
 
     elif query.data == "adm_export_all":
-        msg = await query.message.reply_text("⏳ در حال جمع‌آوری تمامی اکانت‌ها...")
+        msg = await query.message.reply_text("⏳ در حال جمع‌آوری...")
         keys = await db.keys("phone_session:*")
         all_accounts = {}
         for k in keys:
@@ -56,30 +54,30 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if data: all_accounts[phone] = json.loads(data)
             
         if not all_accounts:
-            await msg.edit_text("❌ هیچ اکانتی در دیتابیس یافت نشد.")
+            await msg.edit_text("❌ هیچ اکانتی یافت نشد.")
             return
             
         file_bytes = BytesIO(json.dumps(all_accounts, ensure_ascii=False, indent=2).encode('utf-8'))
-        file_bytes.name = f"Nexus_All_Accounts_{datetime.now().strftime('%Y%m%d')}.json"
+        file_bytes.name = f"Nexus_All_{datetime.now().strftime('%Y%m%d')}.json"
         
-        await context.bot.send_document(chat_id=query.message.chat.id, document=file_bytes, caption=f"📦 خروجی کامل:\n✅ تعداد {len(all_accounts)} اکانت معتبر استخراج شد.")
+        await context.bot.send_document(chat_id=query.message.chat.id, document=file_bytes, caption=f"📦 تعداد {len(all_accounts)} اکانت استخراج شد.")
         await msg.delete()
-
-    elif query.data == "adm_view_logs":
-        logs = await db.lrange("bot:admin_logs", -7, -1)
-        if not logs:
-            await query.message.reply_text("✅ لاگ جدیدی وجود ندارد.")
-            return
-        text = "📋 **آخرین وضعیت سیستم محلی:**\n\n"
-        for log_str in reversed(logs):
-            l = json.loads(log_str)
-            text += f"▪️ `[{l['time']}]` | {l['phone']}\nوضعیت: **{l['status']}**\nجزئیات: {l['details']}\n──────────────\n"
-        await query.message.reply_text(text, parse_mode="Markdown")
 
     elif query.data == "adm_clear_history":
         count = await db.scard("jet:processed_phones")
         await db.delete("jet:processed_phones")
-        await query.message.reply_text(f"🧹 لیست شماره‌های تکراری پاک شد.\n(تعداد {count} شماره از حافظه ردیس حذف گردید)")
+        await query.message.reply_text(f"🧹 لیست ضدتکرار پاک شد ({count} شماره).")
+
+async def alert_listener(app: Application):
+    """ناظر پس‌زمینه: خواندن آلارم‌ها از ردیس و ارسال فوری به ادمین"""
+    while True:
+        try:
+            alert = await db.lpop("bot:admin_alerts")
+            if alert:
+                await app.bot.send_message(chat_id=ADMIN_ID, text=alert, parse_mode="Markdown")
+        except Exception:
+            pass
+        await asyncio.sleep(2)
 
 async def main():
     bot_app = Application.builder().token(TOKEN).build()
@@ -90,6 +88,9 @@ async def main():
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
+    
+    # اجرای ناظر آلارم‌ها به صورت همزمان با ربات
+    asyncio.create_task(alert_listener(bot_app))
     
     try:
         await asyncio.Event().wait()
