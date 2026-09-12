@@ -1,5 +1,5 @@
 """
-🚀 Nexus Extractor - ADMIN AUTOMATION & SECURE TOKEN GENERATOR
+🚀 Nexus Extractor - PRO TELEGRAM BOT (MULTI-ADMIN & AUTO-EXPORT)
 """
 import os, json, asyncio, logging, secrets
 from io import BytesIO
@@ -8,8 +8,13 @@ from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
+# ================= Configuration =================
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
+
+# پشتیبانی از چند ادمین: آیدی‌ها را با کاما جدا کنید (مثال: 123456,7891011)
+admin_ids_env = os.environ.get("ADMIN_IDS", "123456789")
+ADMIN_IDS = [int(x.strip()) for x in admin_ids_env.split(",") if x.strip().isdigit()]
+
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://your-domain.com").rstrip('/')
 PORT = int(os.environ.get("PORT", "8080"))
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
@@ -21,20 +26,39 @@ db = aioredis.from_url(REDIS_URL, decode_responses=True)
 
 logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
 
+# ================= Helper Functions =================
+async def send_links_file(bot, chat_id):
+    """تابع کمکی برای تولید و ارسال فایل لینک‌ها"""
+    records = await db.hgetall("jet:bulk_accounts")
+    if not records:
+        await bot.send_message(chat_id=chat_id, text="❌ هیچ لینکی در سیستم موجود نیست.")
+        return
+        
+    text_content = "🔗 لیست تمام اکانت‌های استخراج شده:\n\n"
+    for phone, val in records.items():
+        data = json.loads(val)
+        link = f"{WEBHOOK_URL}/auth/{data['token']}"
+        text_content += f"📱 شماره: {phone}\n👤 نام: {data['name']}\n🔗 لینک: {link}\n──────────────────\n"
+        
+    file_bytes = BytesIO(text_content.encode('utf-8'))
+    file_bytes.name = f"Nexus_Links_{datetime.now().strftime('%Y%m%d')}.txt"
+    await bot.send_document(chat_id=chat_id, document=file_bytes, caption=f"✅ لیست {len(records)} لینک ورود آماده شد.")
+
+# ================= Telegram Handlers =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
+    if update.effective_user.id not in ADMIN_IDS: return
     await admin_panel(update, context)
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
+    if update.effective_user.id not in ADMIN_IDS: return
     
     keyboard = [
-        [InlineKeyboardButton("▶️ شروع رگباری (کل مودم)", callback_data="adm_start_bulk")],
+        [InlineKeyboardButton("▶️ شروع پردازش همزمان", callback_data="adm_start_bulk")],
         [InlineKeyboardButton("🔗 دریافت فایل تمام لینک‌ها", callback_data="adm_export_links")],
         [InlineKeyboardButton("📦 خروجی دیتابیس JSON", callback_data="adm_export_all")],
-        [InlineKeyboardButton("🧹 فرمت شماره‌های تکراری", callback_data="adm_clear_history")]
+        [InlineKeyboardButton("⚠️ پاکسازی کل دیتابیس", callback_data="adm_clear_db_warn")]
     ]
-    text = "⚙️ **پنل اتوماسیون مرکزی:**\n\nتولید لینک‌ها به صورت کاملاً ایزوله در این سرور انجام می‌شود."
+    text = "⚙️ **پنل اتوماسیون مرکزی:**\n\nتولید لینک‌ها به صورت ایزوله در این سرور انجام می‌شود."
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     else:
@@ -42,29 +66,16 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if query.from_user.id != ADMIN_ID: return
+    if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
 
     if query.data == "adm_start_bulk":
         await db.rpush("bot:admin_commands", "START_BULK")
-        await query.message.reply_text("🚀 عملیات رگباری آغاز شد. منتظر دریافت گزارش باشید...", parse_mode="Markdown")
+        await query.message.reply_text("🚀 عملیات پردازش آغاز شد. گزارشات به زودی ارسال می‌شوند...", parse_mode="Markdown")
 
     elif query.data == "adm_export_links":
-        msg = await query.message.reply_text("⏳ در حال جمع‌آوری لینک‌ها...")
-        records = await db.hgetall("jet:bulk_accounts")
-        if not records:
-            await msg.edit_text("❌ هیچ لینکی در سیستم موجود نیست.")
-            return
-            
-        text_content = "🔗 لیست تمام اکانت‌های استخراج شده:\n\n"
-        for phone, val in records.items():
-            data = json.loads(val)
-            link = f"{WEBHOOK_URL}/auth/{data['token']}"
-            text_content += f"📱 شماره: {phone}\n👤 نام: {data['name']}\n🔗 لینک: {link}\n──────────────────\n"
-            
-        file_bytes = BytesIO(text_content.encode('utf-8'))
-        file_bytes.name = f"Jet_Links_{datetime.now().strftime('%Y%m%d')}.txt"
-        await context.bot.send_document(chat_id=query.message.chat.id, document=file_bytes, caption=f"✅ لیست {len(records)} لینک ورود آماده شد.")
+        msg = await query.message.reply_text("⏳ در حال ساخت فایل لینک‌ها...")
+        await send_links_file(context.bot, query.message.chat.id)
         await msg.delete()
 
     elif query.data == "adm_export_all":
@@ -76,21 +87,50 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if data: all_accounts[k] = json.loads(data)
         
         file_bytes = BytesIO(json.dumps(all_accounts, ensure_ascii=False, indent=2).encode('utf-8'))
-        file_bytes.name = f"Jet_Database_{datetime.now().strftime('%Y%m%d')}.json"
+        file_bytes.name = f"Nexus_Database_{datetime.now().strftime('%Y%m%d')}.json"
         await context.bot.send_document(chat_id=query.message.chat.id, document=file_bytes)
         await msg.delete()
 
-    elif query.data == "adm_clear_history":
+    elif query.data == "adm_clear_db_warn":
+        warn_keyboard = [
+            [InlineKeyboardButton("✅ بله، دیتابیس فلش شود", callback_data="adm_clear_db_confirm")],
+            [InlineKeyboardButton("❌ انصراف", callback_data="adm_cancel_action")]
+        ]
+        await query.message.reply_text(
+            "⚠️ **هشدار امنیتی!**\nآیا از پاکسازی کل دیتابیس اطمینان دارید؟\nاین عملیات تمام لینک‌ها، نشست‌ها و حافظه خطوط استخراج شده را به صورت کامل و غیرقابل بازگشت پاک می‌کند.", 
+            reply_markup=InlineKeyboardMarkup(warn_keyboard), 
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "adm_clear_db_confirm":
+        # پاکسازی تمام جداول مرتبط
         await db.delete("jet:processed_phones")
         await db.delete("jet:bulk_accounts")
-        await query.message.reply_text("🧹 حافظه شماره‌های تکراری و لینک‌ها پاک شد.")
+        keys = await db.keys("jet_session:*")
+        if keys:
+            await db.delete(*keys)
+        await query.message.edit_text("🧹 دیتابیس با موفقیت به صورت کامل فلش شد.")
 
+    elif query.data == "adm_cancel_action":
+        await query.message.edit_text("✅ عملیات لغو شد.")
+
+# ================= Background Workers =================
 async def alert_listener(app: Application):
+    """شنود لاگ‌ها و ارسال به ادمین‌ها + ارسال خودکار لینک در پایان کار"""
     while True:
         try:
             alert = await db.lpop("bot:admin_alerts")
             if alert:
-                await app.bot.send_message(chat_id=ADMIN_ID, text=alert, parse_mode="Markdown")
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await app.bot.send_message(chat_id=admin_id, text=alert, parse_mode="Markdown")
+                        
+                        # تشخیص پایان کار و ارسال خودکار فایل لینک‌ها
+                        if "گزارش نهایی" in alert:
+                            await app.bot.send_message(chat_id=admin_id, text="⏳ در حال آماده‌سازی خودکار فایل لینک‌ها...")
+                            await send_links_file(app.bot, admin_id)
+                    except Exception as e:
+                        pass
         except Exception:
             pass
         await asyncio.sleep(2)
@@ -104,10 +144,8 @@ async def token_generator_worker():
                 acc = json.loads(raw_data)
                 phone, name, final_json = acc["phone"], acc["name"], acc["data"]
                 
-                # تولید توکن فقط در سرور Railway
                 session_token = secrets.token_urlsafe(14)
                 
-                # ذخیره سشن و توکن
                 await db.setex(f"jet_session:{session_token}", 30 * 24 * 3600, json.dumps(final_json, ensure_ascii=False))
                 record = {"phone": phone, "token": session_token, "name": name}
                 await db.hset("jet:bulk_accounts", phone, json.dumps(record, ensure_ascii=False))
@@ -159,7 +197,7 @@ async def main():
     webhook_endpoint = f"{WEBHOOK_URL}/webhook/{TOKEN}"
     await bot_app.bot.set_webhook(url=webhook_endpoint)
     
-    # اجرای همزمان دریافت آلارم و تولید توکن در بک‌گراند
+    # اجرای همزمان فرآیندهای پس‌زمینه
     asyncio.create_task(alert_listener(bot_app))
     asyncio.create_task(token_generator_worker())
     
