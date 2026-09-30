@@ -39,25 +39,37 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://your-domain.com").rstrip("/
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "admin123")
 APP_SECRET_HEADER = "JetApp-Secure-Client"
 
-try:
-    db = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-    db.ping()
-except Exception:
-    db = None
+# اتصال امن به Redis با قابلیت بازیابی خودکار در صورت قطع موقت
+def get_redis_client():
+    try:
+        client = redis.Redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_timeout=4,
+            socket_connect_timeout=4,
+            retry_on_timeout=True,
+        )
+        client.ping()
+        return client
+    except Exception:
+        return None
+
+db = get_redis_client()
 
 
 # ================= Token Worker =================
 def token_worker():
     while True:
-        if db:
+        r = db or get_redis_client()
+        if r:
             try:
-                raw_data = db.lpop("bot:new_accounts")
+                raw_data = r.lpop("bot:new_accounts")
                 if raw_data:
                     acc = json.loads(raw_data)
                     token = secrets.token_urlsafe(14)
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    db.setex(
+                    r.setex(
                         f"jet_session:{token}",
                         30 * 24 * 3600,
                         json.dumps(acc.get("data", {}), ensure_ascii=False),
@@ -70,7 +82,7 @@ def token_worker():
                         "created_at": now_str,
                         "total_orders": 0,
                     }
-                    db.hset(
+                    r.hset(
                         "jet:bulk_accounts",
                         acc.get("phone", ""),
                         json.dumps(record, ensure_ascii=False),
@@ -147,7 +159,10 @@ def protected(view):
     return wrapped
 
 
-def db_or_empty():
+def get_active_db():
+    global db
+    if db is None:
+        db = get_redis_client()
     return db
 
 
@@ -162,25 +177,32 @@ def parse_account(raw, fallback_phone=""):
 
 
 def extract_token_from_line(line):
-    """استخراج امن توکن سشن از داخل URL یا خط متنی خام"""
+    """استخراج امن توکن سشن و استانداردسازی لینک خروجی"""
     line = (line or "").strip()
     if not line:
         return None, None
     match = re.search(r"/auth/([a-zA-Z0-9_\-]+)", line)
     if match:
-        return match.group(1), line
+        token = match.group(1)
+        return token, line
     match = re.search(r"\b([a-zA-Z0-9_\-]{14,64})\b", line)
     if match:
-        return match.group(1), line
+        token = match.group(1)
+        full_link = f"{WEBHOOK_URL}/auth/{token}"
+        return token, full_link
     return None, line
 
 
 def account_rows(acc_type, query=""):
-    if not db_or_empty():
+    r = get_active_db()
+    if not r:
         return []
 
     hash_key = "jet:ordered_accounts" if acc_type == "ordered" else "jet:bulk_accounts"
-    records = db.hgetall(hash_key)
+    try:
+        records = r.hgetall(hash_key)
+    except Exception:
+        return []
 
     def created_at(item):
         account = parse_account(item[1], item[0]) or {}
@@ -190,7 +212,7 @@ def account_rows(acc_type, query=""):
     query = (query or "").strip().lower()
     rows = []
 
-    pipe = db.pipeline(transaction=False)
+    pipe = r.pipeline(transaction=False)
     usable = []
     for phone, raw in sorted_records:
         account = parse_account(raw, phone)
@@ -204,7 +226,11 @@ def account_rows(acc_type, query=""):
         pipe.exists(f"jet_session:{token}")
         pipe.ttl(f"jet_session:{token}")
 
-    link_info = pipe.execute() if usable else []
+    try:
+        link_info = pipe.execute() if usable else []
+    except Exception:
+        link_info = []
+
     for index, ((phone, account), values) in enumerate(zip(usable, zip(link_info[::2], link_info[1::2])), 1):
         exists, ttl = values
         rows.append(
@@ -222,17 +248,17 @@ def account_rows(acc_type, query=""):
     return rows
 
 
-def db_type_and_size(key):
+def db_type_and_size(r, key):
     try:
-        kind = db.type(key)
+        kind = r.type(key)
         if kind == "hash":
-            return kind, db.hlen(key)
+            return kind, r.hlen(key)
         if kind == "list":
-            return kind, db.llen(key)
+            return kind, r.llen(key)
         if kind == "set":
-            return kind, db.scard(key)
+            return kind, r.scard(key)
         if kind == "zset":
-            return kind, db.zcard(key)
+            return kind, r.zcard(key)
         if kind == "string":
             return kind, 1
         return kind, 0
@@ -241,6 +267,10 @@ def db_type_and_size(key):
 
 
 def database_snapshot():
+    r = get_active_db()
+    if not r:
+        return {"items": [], "sessions": 0, "connected": False, "checked_at": ""}
+
     keys = [
         ("jet:bulk_accounts", "حساب‌های پایه"),
         ("jet:ordered_accounts", "حساب‌های دارای سفارش"),
@@ -252,10 +282,15 @@ def database_snapshot():
     ]
     items = []
     for key, label in keys:
-        kind, size = db_type_and_size(key)
+        kind, size = db_type_and_size(r, key)
         items.append({"key": key, "label": label, "type": kind, "size": size})
 
-    session_count = sum(1 for _ in db.scan_iter(match="jet_session:*", count=500))
+    session_count = 0
+    try:
+        session_count = sum(1 for _ in r.scan_iter(match="jet_session:*", count=500))
+    except Exception:
+        pass
+
     return {
         "items": items,
         "sessions": session_count,
@@ -290,7 +325,8 @@ def logout():
 @app.route("/api/stats")
 @protected
 def get_stats():
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify(
             {
                 "total_accounts": 0,
@@ -305,59 +341,80 @@ def get_stats():
             }
         )
 
-    total_normal = db.hlen("jet:bulk_accounts")
-    total_ordered = db.hlen("jet:ordered_accounts")
-    active_proxies = db.get("nexus:active_proxies")
-    is_checking = db.get("nexus:checker_running") == "1"
-    is_file_checking = db.get("nexus:file_checker_running") == "1"
-    last_cmd = db.lindex("bot:admin_commands", -1)
-
-    engine_alive = False
     try:
-        engine_alive = any(client.get("cmd") == "blpop" for client in db.client_list())
+        total_normal = r.hlen("jet:bulk_accounts")
+        total_ordered = r.hlen("jet:ordered_accounts")
+        active_proxies = r.get("nexus:active_proxies")
+        is_checking = r.get("nexus:checker_running") == "1"
+        is_file_checking = r.get("nexus:file_checker_running") == "1"
+        last_cmd = r.lindex("bot:admin_commands", -1)
+        new_q = r.llen("bot:new_accounts")
+        cmd_q = r.llen("bot:admin_commands")
+
+        engine_alive = False
+        try:
+            engine_alive = any(client.get("cmd") == "blpop" for client in r.client_list())
+        except Exception:
+            pass
+
+        if not engine_alive and not is_checking and not is_file_checking:
+            status = "Offline"
+        elif is_file_checking:
+            status = "CheckingFile"
+        elif is_checking:
+            status = "Checking"
+        elif last_cmd and "START_BULK" in last_cmd:
+            status = "Registering"
+        else:
+            status = "Standby"
+
+        return jsonify(
+            {
+                "total_accounts": total_normal,
+                "ordered_accounts": total_ordered,
+                "active_proxies": int(active_proxies) if active_proxies else 0,
+                "system_status": status,
+                "checker_running": is_checking,
+                "file_checker_running": is_file_checking,
+                "new_accounts_queue": new_q,
+                "command_queue": cmd_q,
+                "database_connected": True,
+            }
+        )
     except Exception:
-        pass
-
-    if not engine_alive and not is_checking and not is_file_checking:
-        status = "Offline"
-    elif is_file_checking:
-        status = "CheckingFile"
-    elif is_checking:
-        status = "Checking"
-    elif last_cmd and "START_BULK" in last_cmd:
-        status = "Registering"
-    else:
-        status = "Standby"
-
-    return jsonify(
-        {
-            "total_accounts": total_normal,
-            "ordered_accounts": total_ordered,
-            "active_proxies": int(active_proxies) if active_proxies else 0,
-            "system_status": status,
-            "checker_running": is_checking,
-            "file_checker_running": is_file_checking,
-            "new_accounts_queue": db.llen("bot:new_accounts"),
-            "command_queue": db.llen("bot:admin_commands"),
-            "database_connected": True,
-        }
-    )
+        return jsonify(
+            {
+                "total_accounts": 0,
+                "ordered_accounts": 0,
+                "active_proxies": 0,
+                "system_status": "Offline",
+                "checker_running": False,
+                "file_checker_running": False,
+                "new_accounts_queue": 0,
+                "command_queue": 0,
+                "database_connected": False,
+            }
+        )
 
 
 @app.route("/api/logs")
 @protected
 def get_logs():
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"logs": []})
-    raw_logs = db.lrange("bot:admin_alerts", -60, -1)
-    logs = [
-        {
-            "timestamp": datetime.now().strftime("%H:%M:%S"),
-            "message": str(log).replace("\n", " - "),
-        }
-        for log in raw_logs
-    ]
-    return jsonify({"logs": logs})
+    try:
+        raw_logs = r.lrange("bot:admin_alerts", -60, -1)
+        logs = [
+            {
+                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                "message": str(log).replace("\n", " - "),
+            }
+            for log in raw_logs
+        ]
+        return jsonify({"logs": logs})
+    except Exception:
+        return jsonify({"logs": []})
 
 
 @app.route("/api/accounts/<acc_type>")
@@ -371,8 +428,6 @@ def get_accounts(acc_type):
 @app.route("/api/database/overview")
 @protected
 def database_overview():
-    if not db:
-        return jsonify({"connected": False, "items": [], "sessions": 0})
     return jsonify(database_snapshot())
 
 
@@ -412,18 +467,21 @@ def export_accounts(acc_type, file_format):
 @app.route("/api/file_checker/upload", methods=["POST"])
 @protected
 def file_checker_upload():
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
 
     raw_text = ""
-    if "file" in request.files:
-        uploaded_file = request.files["file"]
-        if uploaded_file.filename:
-            raw_text = uploaded_file.read().decode("utf-8", errors="ignore")
-    elif request.is_json:
-        raw_text = (request.json or {}).get("text", "")
-    else:
-        raw_text = request.form.get("text", "")
+    # بررسی فایل ارسال‌شده
+    if "file" in request.files and request.files["file"].filename:
+        raw_text = request.files["file"].read().decode("utf-8", errors="ignore")
+    
+    # اگر فایلی نبود، متن مستقیم کادر بررسی می‌شود
+    if not raw_text.strip():
+        if request.is_json:
+            raw_text = (request.json or {}).get("text", "")
+        else:
+            raw_text = request.form.get("text", "")
 
     raw_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
     if not raw_lines:
@@ -444,8 +502,7 @@ def file_checker_upload():
     job_key = f"nexus:file_job:{job_id}"
     items_key = f"nexus:file_job_items:{job_id}"
 
-    # پاک‌سازی و ذخیره آیتم‌ها
-    pipe = db.pipeline(transaction=True)
+    pipe = r.pipeline(transaction=True)
     pipe.delete(items_key)
     pipe.delete(f"nexus:file_job_ordered:{job_id}")
     pipe.delete(f"nexus:file_job_clean:{job_id}")
@@ -468,8 +525,8 @@ def file_checker_upload():
     pipe.set("nexus:latest_file_job", job_id)
     pipe.execute()
 
-    # ارسال فرمان به موتور پردازشگر
-    db.rpush("bot:admin_commands", f"CHECK_FILE:{job_id}")
+    # ارسال مستقیم فرمان به موتور
+    r.rpush("bot:admin_commands", f"CHECK_FILE:{job_id}")
 
     return jsonify({
         "status": "ok",
@@ -482,10 +539,11 @@ def file_checker_upload():
 @app.route("/api/file_checker/status/<job_id>")
 @protected
 def file_checker_status(job_id):
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
 
-    job_raw = db.get(f"nexus:file_job:{job_id}")
+    job_raw = r.get(f"nexus:file_job:{job_id}")
     if not job_raw:
         return jsonify({"error": "تسک مورد نظر یافت نشد."}), 404
 
@@ -500,15 +558,16 @@ def file_checker_status(job_id):
 @app.route("/api/file_checker/result/<job_id>")
 @protected
 def file_checker_result(job_id):
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
 
-    job_raw = db.get(f"nexus:file_job:{job_id}")
+    job_raw = r.get(f"nexus:file_job:{job_id}")
     if not job_raw:
         return jsonify({"error": "تسک یافت نشد."}), 404
 
     def parse_list(key):
-        items = db.lrange(key, 0, -1)
+        items = r.lrange(key, 0, -1)
         res = []
         for x in items:
             try:
@@ -533,23 +592,30 @@ def file_checker_result(job_id):
 @app.route("/api/file_checker/export/<job_id>/<category>")
 @protected
 def export_file_checker(job_id, category):
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
 
     if category not in {"ordered", "clean", "invalid"}:
         return jsonify({"error": "دسته‌بندی نامعتبر است."}), 400
 
-    raw_items = db.lrange(f"nexus:file_job_{category}:{job_id}", 0, -1)
+    raw_items = r.lrange(f"nexus:file_job_{category}:{job_id}", 0, -1)
     links = []
     for raw in raw_items:
         try:
             data = json.loads(raw)
-            link_val = data.get("link") or (f"{WEBHOOK_URL}/auth/{data.get('token')}" if data.get("token") else "")
+            link_val = data.get("link", "").strip()
+            if link_val and not link_val.startswith("http"):
+                token = data.get("token") or link_val
+                link_val = f"{WEBHOOK_URL}/auth/{token}"
+            elif not link_val and data.get("token"):
+                link_val = f"{WEBHOOK_URL}/auth/{data.get('token')}"
+
             if link_val:
                 links.append(link_val)
         except Exception:
             if raw:
-                links.append(str(raw))
+                links.append(str(raw).strip())
 
     content = "\n".join(links)
     category_fa = {"ordered": "daraye-kharid", "clean": "bedone-kharid", "invalid": "namotabar"}.get(category, category)
@@ -565,9 +631,10 @@ def export_file_checker(job_id, category):
 @app.route("/api/file_checker/stop", methods=["POST"])
 @protected
 def stop_file_checker():
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
-    db.set("nexus:file_checker_stop", "1")
+    r.set("nexus:file_checker_stop", "1")
     return jsonify({"status": "ok", "message": "سیگنال توقف برای بررسی فایل ارسال شد."})
 
 
@@ -575,48 +642,52 @@ def stop_file_checker():
 @app.route("/api/checker/start", methods=["POST"])
 @protected
 def start_checker():
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
     req = request.json or {}
     start_idx = max(1, int(req.get("start_idx", 1)))
     end_idx = max(start_idx, int(req.get("end_idx", 200)))
-    db.delete("bot:admin_commands")
-    db.rpush("bot:admin_commands", f"START_CHECKER:{start_idx}:{end_idx}")
+    r.delete("bot:admin_commands")
+    r.rpush("bot:admin_commands", f"START_CHECKER:{start_idx}:{end_idx}")
     return jsonify({"status": "ok", "message": f"بررسی ردیف‌های {start_idx} تا {end_idx} در صف قرار گرفت."})
 
 
 @app.route("/api/checker/stop", methods=["POST"])
 @protected
 def stop_checker():
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
-    db.set("nexus:checker_stop", "1")
+    r.set("nexus:checker_stop", "1")
     return jsonify({"status": "ok", "message": "درخواست توقف برای موتور ارسال شد."})
 
 
 @app.route("/api/action/clear_logs", methods=["POST"])
 @protected
 def clear_logs():
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
-    db.delete("bot:admin_alerts", "nexus:checker_logs")
+    r.delete("bot:admin_alerts", "nexus:checker_logs")
     return jsonify({"status": "ok", "message": "گزارش‌های سیستم پاک شد."})
 
 
 @app.route("/api/action/<cmd>", methods=["POST"])
 @protected
 def handle_action(cmd):
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
     if cmd == "start":
-        db.delete("bot:admin_commands")
-        db.rpush("bot:admin_commands", "START_BULK")
+        r.delete("bot:admin_commands")
+        r.rpush("bot:admin_commands", "START_BULK")
         return jsonify({"status": "ok", "message": "فرمان ثبت‌نام در صف قرار گرفت."})
     if cmd == "clean":
         req = request.json or {}
         if req.get("code") != "NEXUS-WIPE-ALL":
             return jsonify({"status": "error", "message": "کد تأیید اشتباه است."})
-        db.delete(
+        r.delete(
             "jet:processed_phones",
             "jet:bulk_accounts",
             "jet:ordered_accounts",
@@ -624,10 +695,10 @@ def handle_action(cmd):
             "bot:new_accounts",
             "nexus:checker_logs",
         )
-        for key in db.scan_iter(match="jet_session:*", count=500):
-            db.delete(key)
-        for key in db.scan_iter(match="nexus:file_job*", count=500):
-            db.delete(key)
+        for key in r.scan_iter(match="jet_session:*", count=500):
+            r.delete(key)
+        for key in r.scan_iter(match="nexus:file_job*", count=500):
+            r.delete(key)
         return jsonify({"status": "ok", "message": "داده‌های مدیریتی و نشست‌ها پاک شدند."})
     return jsonify({"status": "error", "message": "فرمان ناشناخته است."}), 404
 
@@ -635,7 +706,8 @@ def handle_action(cmd):
 @app.route("/api/action/delete_account", methods=["POST"])
 @protected
 def delete_account():
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"status": "error", "message": "اتصال دیتابیس برقرار نیست."}), 503
     payload = request.json or {}
     phone = str(payload.get("phone", "")).strip()
@@ -644,13 +716,13 @@ def delete_account():
 
     deleted = False
     for hash_key in ["jet:bulk_accounts", "jet:ordered_accounts"]:
-        rec = db.hget(hash_key, phone)
+        rec = r.hget(hash_key, phone)
         if rec:
             acc = parse_account(rec, phone) or {}
             if acc.get("token"):
-                db.delete(f"jet_session:{acc['token']}")
-            db.hdel(hash_key, phone)
-            db.srem("jet:processed_phones", phone)
+                r.delete(f"jet_session:{acc['token']}")
+            r.hdel(hash_key, phone)
+            r.srem("jet:processed_phones", phone)
             deleted = True
     return jsonify(
         {
@@ -663,16 +735,17 @@ def delete_account():
 @app.route("/api/action/revoke_link", methods=["POST"])
 @protected
 def revoke_link():
-    if not db:
+    r = get_active_db()
+    if not r:
         return jsonify({"status": "error", "message": "اتصال دیتابیس برقرار نیست."}), 503
     phone = str((request.json or {}).get("phone", "")).strip()
     for hash_key in ["jet:bulk_accounts", "jet:ordered_accounts"]:
-        raw = db.hget(hash_key, phone)
+        raw = r.hget(hash_key, phone)
         if raw:
             account = parse_account(raw, phone) or {}
             token = account.get("token")
             if token:
-                db.delete(f"jet_session:{token}")
+                r.delete(f"jet_session:{token}")
                 return jsonify({"status": "ok", "message": "لینک ورود این حساب باطل شد."})
     return jsonify({"status": "not_found", "message": "حسابی با این شماره پیدا نشد."}), 404
 
@@ -680,9 +753,10 @@ def revoke_link():
 # ================= Client gateway =================
 @app.route("/auth/<token>")
 def secure_gateway(token):
-    if not db:
+    r = get_active_db()
+    if not r:
         return "Server Error", 500
-    session_str = db.get(f"jet_session:{token}")
+    session_str = r.get(f"jet_session:{token}")
     if not session_str:
         return (
             '<html dir="rtl"><body style="background:#f8fafc;color:#e11d48;font-family:Tahoma;text-align:center;padding:50px;">'
@@ -701,4 +775,3 @@ def secure_gateway(token):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-
