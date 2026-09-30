@@ -177,7 +177,7 @@
         </section>
 
         <section id="view-accounts" class="view">
-          <div class="section-head"><div><h2 class="section-title">حساب‌ها و لینک‌های ورود</h2><p class="section-note">جست‌وجو، کپی، خروجی‌گیری و مدیریت وضعیت لینک هر حساب</p></div><div><button class="btn btn-light" onclick="downloadExport('csv')">خروجی CSV</button> <button class="btn btn-primary" onclick="downloadExport('json')">خروجی JSON</button></div></div>
+          <div class="section-head"><div><h2 class="section-title">حساب‌ها و لینک‌های ورود</h2><p class="section-note">جست‌‌وجو، کپی، خروجی‌گیری و مدیریت وضعیت لینک هر حساب</p></div><div><button class="btn btn-light" onclick="downloadExport('csv')">خروجی CSV</button> <button class="btn btn-primary" onclick="downloadExport('json')">خروجی JSON</button></div></div>
           <section class="card">
             <div class="toolbar"><div class="tabs"><button class="tab active" id="tab-normal" onclick="switchAccounts('normal')">حساب‌های پایه</button><button class="tab" id="tab-ordered" onclick="switchAccounts('ordered')">دارای سفارش</button></div><div class="toolbar-tools"><input id="account-search" class="search" placeholder="جست‌وجوی شماره یا نام…" oninput="debouncedAccounts()"><button class="btn btn-light" onclick="copyAllLinks()">کپی لینک‌ها</button></div></div>
             <div class="table-wrap"><table><thead><tr><th>#</th><th>شماره</th><th>نام</th><th>تاریخ ثبت</th><th>وضعیت لینک</th><th>لینک ورود</th><th>عملیات</th></tr></thead><tbody id="accounts-body"></tbody></table></div>
