@@ -17,7 +17,7 @@
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--canvas); color: var(--ink); }
-    button, input { font: inherit; }
+    button, input, textarea { font: inherit; }
     button { cursor: pointer; }
     .layout { min-height: 100vh; display: flex; }
     .sidebar { width: 248px; flex: 0 0 248px; min-height: 100vh; background: #132238; color: #fff; padding: 24px 16px;
@@ -63,11 +63,12 @@
     .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
     .section-title { font-size: 14px; font-weight: 800; margin: 0; }
     .section-note { font-size: 11px; color: var(--muted); margin: 4px 0 0; }
-    .btn { border: 1px solid transparent; border-radius: 8px; padding: 9px 13px; font-size: 11px; font-weight: 700; }
+    .btn { border: 1px solid transparent; border-radius: 8px; padding: 9px 13px; font-size: 11px; font-weight: 700; transition: .15s ease; }
     .btn-primary { color: white; background: var(--blue); } .btn-primary:hover { background: #1d4ed8; }
     .btn-light { color: #44536a; background: #fff; border-color: var(--line); } .btn-light:hover { background: #f5f8fc; }
     .btn-danger { color: var(--red); background: var(--red-soft); border-color: #ffd5d2; }
     .btn-danger:hover { background: #ffe4e1; }
+    .btn-success { color: white; background: #16845b; } .btn-success:hover { background: #126e4b; }
     .btn:disabled { opacity: .55; cursor: not-allowed; }
     .overview-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 18px; margin-bottom: 24px; }
     .engine-card, .log-card { padding: 20px; }
@@ -104,6 +105,7 @@
     .copy-btn:hover, .more-btn:hover { border-color: #9abaf5; color: var(--blue); background: var(--blue-soft); }
     .pill { display: inline-flex; border-radius: 20px; padding: 5px 8px; font-size: 10px; font-weight: 700; }
     .pill-green { color: var(--green); background: var(--green-soft); } .pill-gray { color: var(--muted); background: #f0f3f7; }
+    .pill-red { color: var(--red); background: var(--red-soft); }
     .empty { padding: 45px 20px; text-align: center; color: var(--muted); font-size: 12px; }
     .table-foot { display: flex; justify-content: space-between; padding: 12px 17px; color: var(--muted); font-size: 10px; border-top: 1px solid var(--line); }
     .database-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -111,6 +113,27 @@
     .db-list { overflow: hidden; } .db-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 14px 18px; border-top: 1px solid #eef2f7; }
     .db-row:first-child { border-top: 0; } .db-label { font-size: 12px; font-weight: 700; } .db-key { color: var(--muted); font: 10px ui-monospace, monospace; margin-top: 4px; direction: ltr; text-align: right; }
     .db-count { color: var(--blue); background: var(--blue-soft); border-radius: 6px; padding: 5px 8px; font-size: 10px; font-weight: 800; white-space: nowrap; }
+
+    /* استایل‌های بخش بررسی فایل */
+    .file-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 18px; margin-bottom: 22px; }
+    .upload-card, .progress-card { padding: 20px; }
+    .file-dropzone { border: 2px dashed #cfd9e8; border-radius: 11px; padding: 22px 18px; text-align: center; background: #fbfcfe; cursor: pointer; transition: .2s; }
+    .file-dropzone:hover { border-color: var(--blue); background: var(--blue-soft); }
+    .file-dropzone input { display: none; }
+    .file-dropzone-icon { font-size: 26px; color: var(--blue); margin-bottom: 6px; }
+    .file-dropzone strong { display: block; font-size: 12px; margin-bottom: 4px; }
+    .file-dropzone small { color: var(--muted); font-size: 10px; }
+    .text-divider { display: flex; align-items: center; gap: 10px; margin: 14px 0; color: var(--muted); font-size: 10px; }
+    .text-divider::before, .text-divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+    .link-textarea { width: 100%; height: 95px; border: 1px solid var(--line); border-radius: 9px; padding: 10px; font-size: 11px; direction: ltr; resize: vertical; outline: none; }
+    .link-textarea:focus { border-color: #8db2f8; }
+    .progress-bar-wrap { width: 100%; height: 10px; background: #eef3f9; border-radius: 10px; overflow: hidden; margin: 16px 0; }
+    .progress-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #2563eb, #10b981); transition: width .3s ease; }
+    .file-stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
+    .file-stat-box { background: #f8fafc; border: 1px solid var(--line); border-radius: 9px; padding: 10px; text-align: center; }
+    .file-stat-val { font-size: 18px; font-weight: 800; margin-top: 4px; }
+    .val-ordered { color: var(--green); } .val-clean { color: var(--muted); } .val-invalid { color: var(--red); }
+
     .modal-backdrop { position: fixed; inset: 0; z-index: 20; background: rgba(15, 28, 47, .48); display: none; place-items: center; padding: 20px; }
     .modal-backdrop.open { display: grid; } .modal { width: min(100%, 440px); background: #fff; border-radius: 14px; padding: 22px; box-shadow: 0 22px 70px rgba(0,0,0,.2); }
     .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
@@ -122,7 +145,7 @@
     .toast { position: fixed; bottom: 22px; right: 24px; z-index: 30; background: #162a45; color: white; border-radius: 9px; padding: 12px 15px;
       font-size: 11px; box-shadow: 0 10px 28px rgba(10,25,48,.2); opacity: 0; transform: translateY(8px); pointer-events: none; transition: .2s; }
     .toast.show { opacity: 1; transform: translateY(0); } .toast.error { background: #a92f2b; }
-    @media (max-width: 1050px) { .sidebar { width: 210px; flex-basis: 210px; } .content, .topbar { padding-left: 22px; padding-right: 22px; } .overview-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 1050px) { .sidebar { width: 210px; flex-basis: 210px; } .content, .topbar { padding-left: 22px; padding-right: 22px; } .overview-grid, .file-grid { grid-template-columns: 1fr; } }
     @media (max-width: 760px) { .layout { display: block; } .sidebar { min-height: 0; width: 100%; height: auto; padding: 12px 14px; }
       .brand { padding: 0 5px 12px; } .nav-title, .side-footer { display: none; } .nav { display: flex; gap: 4px; overflow-x: auto; padding-top: 10px; }
       .nav-btn { width: auto; flex: 0 0 auto; margin: 0; padding: 9px 11px; } .nav-btn span:not(.nav-icon) { display: none; }
@@ -141,6 +164,7 @@
       <nav class="nav">
         <button class="nav-btn active" data-view="dashboard"><span class="nav-icon">⌂</span><span>نمای کلی</span></button>
         <button class="nav-btn" data-view="accounts"><span class="nav-icon">▣</span><span>حساب‌ها و لینک‌ها</span></button>
+        <button class="nav-btn" data-view="file-checker"><span class="nav-icon">⎘</span><span>بررسی فایل لینک‌ها</span></button>
         <button class="nav-btn" data-view="database"><span class="nav-icon">◫</span><span>وضعیت دیتابیس</span></button>
       </nav>
       <div class="side-footer"><b>وضعیت سرویس</b><span id="side-status">در حال دریافت وضعیت…</span></div>
@@ -153,6 +177,7 @@
       </header>
 
       <div class="content">
+        <!-- View: نمای کلی -->
         <section id="view-dashboard" class="view active">
           <div class="stats">
             <div class="card stat"><span class="stat-label">حساب‌های پایه</span><div class="stat-number" id="stat-total">—</div><div class="stat-foot">حساب‌های آماده در دیتابیس</div><div class="stat-icon">ح</div></div>
@@ -166,8 +191,8 @@
               <div class="status-line"><span id="engine-point" class="status-point"></span><div><strong id="engine-status">در حال دریافت وضعیت</strong><small id="engine-detail">—</small></div></div>
               <div class="engine-actions">
                 <button class="engine-action primary" id="start-btn" onclick="startBulk()"><strong>شروع ثبت‌نام</strong><span>ارسال فرمان START_BULK</span></button>
-                <button class="engine-action" onclick="openChecker()"><strong>بررسی سفارش‌ها</strong><span>انتخاب بازهٔ حساب‌ها</span></button>
-                <button class="engine-action" onclick="stopChecker()"><strong>توقف بررسی</strong><span>ارسال سیگنال توقف</span></button>
+                <button class="engine-action" onclick="openChecker()"><strong>بررسی سفارش‌ها (دیتابیس)</strong><span>انتخاب بازهٔ حساب‌ها</span></button>
+                <button class="engine-action" onclick="stopChecker()"><strong>توقف بررسی دیتابیس</strong><span>ارسال سیگنال توقف</span></button>
                 <button class="engine-action" onclick="clearLogs()"><strong>پاک‌کردن گزارش‌ها</strong><span>حذف لاگ‌های مدیریتی</span></button>
               </div>
             </section>
@@ -175,6 +200,7 @@
           </div>
         </section>
 
+        <!-- View: حساب‌ها و لینک‌ها -->
         <section id="view-accounts" class="view">
           <div class="section-head"><div><h2 class="section-title">حساب‌ها و لینک‌های ورود</h2><p class="section-note">جست‌وجو، کپی، خروجی‌گیری و مدیریت وضعیت لینک هر حساب</p></div><div><button class="btn btn-light" onclick="downloadExport('csv')">خروجی CSV</button> <button class="btn btn-primary" onclick="downloadExport('json')">خروجی JSON</button></div></div>
           <section class="card">
@@ -184,6 +210,87 @@
           </section>
         </section>
 
+        <!-- View: بررسی فایل لینک‌ها (بخش جدید) -->
+        <section id="view-file-checker" class="view">
+          <div class="section-head">
+            <div>
+              <h2 class="section-title">بررسی فایل متنی لینک‌ها</h2>
+              <p class="section-note">بررسی سوابق خرید لینک‌ها از فایل متنی، گزارش حساب‌های خریددار و تفکیک لینک‌های بدون سابقه</p>
+            </div>
+            <div>
+              <button class="btn btn-danger" id="file-stop-btn" style="display:none;" onclick="stopFileChecker()">توقف بررسی</button>
+            </div>
+          </div>
+
+          <div class="file-grid">
+            <section class="card upload-card">
+              <div class="section-title" style="margin-bottom:12px;">ورودی فایل یا لینک‌ها</div>
+              <div class="file-dropzone" onclick="$('file-input').click()">
+                <input type="file" id="file-input" accept=".txt" onchange="handleFileChosen(this)">
+                <div class="file-dropzone-icon">📁</div>
+                <strong id="file-drop-label">برای انتخاب فایل TXT کلیک کنید</strong>
+                <small>فایل متنی حاوی لینک‌های auth سرویس</small>
+              </div>
+              <div class="text-divider">یا چسباندن مستقیم لینک‌ها</div>
+              <textarea id="links-text" class="link-textarea" placeholder="هر لینک در یک سطر:&#10;https://domain.com/auth/token1&#10;https://domain.com/auth/token2"></textarea>
+              <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:14px;">
+                <button class="btn btn-light" onclick="clearFileInputs()">پاک‌سازی فرم</button>
+                <button class="btn btn-primary" id="file-start-btn" onclick="submitFileChecker()">شروع بررسی لینک‌ها</button>
+              </div>
+            </section>
+
+            <section class="card progress-card">
+              <div class="section-title">وضعیت پردازش لینک‌ها</div>
+              <div class="section-note" id="file-status-note">در انتظار بارگذاری فایل یا ارسال لینک‌ها…</div>
+              <div class="progress-bar-wrap">
+                <div class="progress-bar-fill" id="file-progress-bar"></div>
+              </div>
+              <div style="display:flex; justify-content:space-between; font-size:11px; font-weight:700; color:var(--muted);">
+                <span id="file-progress-text">۰٪</span>
+                <span id="file-progress-counts">۰ از ۰ لینک</span>
+              </div>
+              <div class="file-stats-grid">
+                <div class="file-stat-box"><span class="stat-label">دارای خرید</span><div class="file-stat-val val-ordered" id="fstat-ordered">۰</div></div>
+                <div class="file-stat-box"><span class="stat-label">بدون خرید (خام)</span><div class="file-stat-val val-clean" id="fstat-clean">۰</div></div>
+                <div class="file-stat-box"><span class="stat-label">نامعتبر / منقضی</span><div class="file-stat-val val-invalid" id="fstat-invalid">۰</div></div>
+              </div>
+            </section>
+          </div>
+
+          <!-- نتایج تفکیک‌شده -->
+          <section class="card">
+            <div class="toolbar">
+              <div class="tabs">
+                <button class="tab active" id="ftab-ordered" onclick="switchFileTab('ordered')">دارای خرید (<span id="ftab-cnt-ordered">۰</span>)</button>
+                <button class="tab" id="ftab-clean" onclick="switchFileTab('clean')">بدون سابقه (خام) (<span id="ftab-cnt-clean">۰</span>)</button>
+                <button class="tab" id="ftab-invalid" onclick="switchFileTab('invalid')">نامعتبر / خطا (<span id="ftab-cnt-invalid">۰</span>)</button>
+              </div>
+              <div class="toolbar-tools">
+                <button class="btn btn-light" onclick="copyCurrentFileLinks()">کپی لینک‌های این تب</button>
+                <button class="btn btn-primary" id="export-file-btn" onclick="downloadFileExport()">دانلود فایل TXT خروجی</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>شماره همراه</th>
+                    <th>تعداد سفارش‌ها</th>
+                    <th>وضعیت</th>
+                    <th>لینک ورود کامل</th>
+                    <th>عملیات</th>
+                  </tr>
+                </thead>
+                <tbody id="file-results-body">
+                  <tr><td class="empty" colspan="6">هنوز فایلی بررسی نشده است.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <!-- View: وضعیت دیتابیس -->
         <section id="view-database" class="view">
           <div class="section-head"><div><h2 class="section-title">وضعیت دیتابیس</h2><p class="section-note">نمایش حجم کلیدهای عملیاتی؛ مقدار حساس ذخیره‌شده نمایش داده نمی‌شود.</p></div><div><button class="btn btn-danger" onclick="askWipe()">پاک‌سازی کامل</button> <button class="btn btn-light" onclick="loadDatabase()">به‌روزرسانی</button></div></div>
           <div class="database-grid"><section class="card db-summary"><div class="section-title">نشست‌های فعال</div><div class="db-summary-number" id="session-count">—</div><div class="section-note">کلیدهای jet_session موجود در Redis</div></section><section class="card db-list" id="db-list"><div class="empty">در حال دریافت اطلاعات…</div></section></div>
@@ -192,44 +299,77 @@
     </main>
   </div>
 
-  <div class="modal-backdrop" id="checker-modal"><div class="modal"><div class="modal-head"><h3>بررسی سفارش‌ها</h3><button class="close" onclick="closeModal('checker-modal')">×</button></div><p class="modal-help">بازهٔ حساب‌هایی که باید بررسی شوند را مشخص کنید. شمارهٔ ردیف‌ها بر اساس ترتیب جدیدترین حساب‌هاست.</p><div style="display:flex;gap:10px"><div class="field" style="flex:1"><label>از ردیف</label><input id="checker-start" type="number" min="1" value="1"></div><div class="field" style="flex:1"><label>تا ردیف</label><input id="checker-end" type="number" min="1" value="200"></div></div><div class="modal-actions"><button class="btn btn-light" onclick="closeModal('checker-modal')">انصراف</button><button class="btn btn-primary" onclick="submitChecker()">شروع بررسی</button></div></div></div>
-  <div class="modal-backdrop" id="confirm-modal"><div class="modal"><div class="modal-head"><h3 id="confirm-title">مدیریت عملیات</h3><button class="close" onclick="closeModal('confirm-modal')">×</button></div><p class="modal-help" id="confirm-text"></p><div class="modal-actions"><button class="btn btn-light" onclick="closeModal('confirm-modal')">انصراف</button><button class="btn btn-danger" id="delete-action">حذف حساب</button><button class="btn btn-primary" id="confirm-action">ابطال لینک</button></div></div></div>
+  <div class="modal-backdrop" id="checker-modal"><div class="modal"><div class="modal-head"><h3>بررسی سفارش‌ها (دیتابیس)</h3><button class="close" onclick="closeModal('checker-modal')">×</button></div><p class="modal-help">بازهٔ حساب‌هایی که باید بررسی شوند را مشخص کنید. شمارهٔ ردیف‌ها بر اساس ترتیب جدیدترین حساب‌هاست.</p><div style="display:flex;gap:10px"><div class="field" style="flex:1"><label>از ردیف</label><input id="checker-start" type="number" min="1" value="1"></div><div class="field" style="flex:1"><label>تا ردیف</label><input id="checker-end" type="number" min="1" value="200"></div></div><div class="modal-actions"><button class="btn btn-light" onclick="closeModal('checker-modal')">انصراف</button><button class="btn btn-primary" onclick="submitChecker()">شروع بررسی</button></div></div></div>
+  <div class="modal-backdrop" id="confirm-modal"><div class="modal"><div class="modal-head"><h3 id="confirm-title">مدیریت حساب</h3><button class="close" onclick="closeModal('confirm-modal')">×</button></div><p class="modal-help" id="confirm-text"></p><div class="modal-actions"><button class="btn btn-light" onclick="closeModal('confirm-modal')">انصراف</button><button class="btn btn-danger" id="delete-action">حذف حساب</button><button class="btn btn-primary" id="confirm-action">ابطال لینک</button></div></div></div>
   <div class="modal-backdrop" id="wipe-modal"><div class="modal"><div class="modal-head"><h3>پاک‌سازی کامل داده‌ها</h3><button class="close" onclick="closeModal('wipe-modal')">×</button></div><p class="modal-help">این کار حساب‌ها، نشست‌ها، صف‌ها و گزارش‌ها را حذف می‌کند و قابل بازگردانی نیست.</p><div class="field"><label>برای تأیید عبارت زیر را وارد کنید: NEXUS-WIPE-ALL</label><input id="wipe-code" autocomplete="off"></div><div class="modal-actions"><button class="btn btn-light" onclick="closeModal('wipe-modal')">انصراف</button><button class="btn btn-danger" onclick="wipeDatabase()">پاک‌سازی</button></div></div></div>
   <div id="toast" class="toast"></div>
 
   <script>
     let currentView = 'dashboard', accountType = 'normal', accounts = [], logSignature = '', searchTimer;
+    let currentFileTab = 'ordered', currentJobId = null, fileJobTimer = null;
+    let fileResults = { ordered: [], clean: [], invalid: [] };
+
     const viewMeta = {
       dashboard: ['نمای کلی', 'وضعیت موتور و داده‌های اصلی سرویس'],
       accounts: ['حساب‌ها و لینک‌ها', 'مدیریت حساب‌ها و لینک‌های ورود'],
+      'file-checker': ['بررسی فایل لینک‌ها', 'بررسی سوابق خرید لینک‌ها از فایل متنی و تفکیک خروجی‌ها'],
       database: ['وضعیت دیتابیس', 'نمایش اندازهٔ کلیدهای عملیاتی Redis']
     };
     const $ = id => document.getElementById(id);
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
     function toast(message, error = false) { const el = $('toast'); el.textContent = message; el.className = `toast show${error ? ' error' : ''}`; clearTimeout(window.toastTimer); window.toastTimer = setTimeout(() => el.className = 'toast', 3200); }
     async function api(url, options = {}) { const response = await fetch(url, options); const data = await response.json(); if (!response.ok) throw new Error(data.message || data.error || 'عملیات انجام نشد.'); return data; }
-    function openModal(id) { $(id).classList.add('open'); } function closeModal(id) { $(id).classList.remove('open'); }
-    function switchView(view) { currentView = view; document.querySelectorAll('.view').forEach(el => el.classList.toggle('active', el.id === `view-${view}`)); document.querySelectorAll('.nav-btn').forEach(el => el.classList.toggle('active', el.dataset.view === view)); $('page-title').textContent = viewMeta[view][0]; $('page-subtitle').textContent = viewMeta[view][1]; if (view === 'accounts') loadAccounts(); if (view === 'database') loadDatabase(); }
+    function openModal(id) { $(id).classList.add('open'); } function closeModal(id) {$(id).classList.remove('open'); }
+    function switchView(view) { currentView = view; document.querySelectorAll('.view').forEach(el => el.classList.toggle('active', el.id === `view-${view}`)); document.querySelectorAll('.nav-btn').forEach(el => el.classList.toggle('active', el.dataset.view === view)); $('page-title').textContent = viewMeta[view][0];$('page-subtitle').textContent = viewMeta[view][1]; if (view === 'accounts') loadAccounts(); if (view === 'database') loadDatabase(); }
     document.querySelectorAll('.nav-btn').forEach(btn => btn.addEventListener('click', () => switchView(btn.dataset.view)));
-    function statusText(status) { return ({Offline:'موتور در دسترس نیست', Standby:'آمادهٔ دریافت فرمان', Registering:'در حال ثبت‌نام حساب‌ها', Checking:'در حال بررسی سفارش‌ها'})[status] || status; }
+
+    function statusText(status) {
+      return ({
+        Offline: 'موتور در دسترس نیست',
+        Standby: 'آمادهٔ دریافت فرمان',
+        Registering: 'در حال ثبت‌نام حساب‌ها',
+        Checking: 'در حال بررسی سفارش‌ها (دیتابیس)',
+        CheckingFile: 'در حال بررسی فایل لینک‌ها'
+      })[status] || status;
+    }
+
     async function loadStats() {
       try {
         const data = await api('/api/stats');
-        $('stat-total').textContent = data.total_accounts.toLocaleString('fa-IR'); $('stat-ordered').textContent = data.ordered_accounts.toLocaleString('fa-IR');
-        $('stat-proxies').textContent = data.active_proxies ? data.active_proxies.toLocaleString('fa-IR') : '—'; $('stat-queue').textContent = (data.new_accounts_queue + data.command_queue).toLocaleString('fa-IR');
-        $('engine-status').textContent = statusText(data.system_status); $('engine-detail').textContent = data.checker_running ? 'فرآیند بررسی فعال است' : `صف فرمان: ${data.command_queue.toLocaleString('fa-IR')} مورد`;
-        $('side-status').textContent = statusText(data.system_status); $('connection').classList.toggle('offline', !data.database_connected);
-        const point = $('engine-point'); point.className = `status-point ${data.system_status === 'Offline' ? '' : data.checker_running || data.system_status === 'Registering' ? 'busy' : 'active'}`;
-      } catch (error) { $('connection').classList.add('offline'); $('side-status').textContent = 'اتصال دیتابیس برقرار نیست'; $('engine-status').textContent = 'اتصال برقرار نشد'; }
+        $('stat-total').textContent = data.total_accounts.toLocaleString('fa-IR');
+        $('stat-ordered').textContent = data.ordered_accounts.toLocaleString('fa-IR');$('stat-proxies').textContent = data.active_proxies ? data.active_proxies.toLocaleString('fa-IR') : '—';
+        $('stat-queue').textContent = (data.new_accounts_queue + data.command_queue).toLocaleString('fa-IR');
+        $('engine-status').textContent = statusText(data.system_status);$('engine-detail').textContent = data.file_checker_running ? 'بررسی فایل لینک‌ها در حال انجام است' : (data.checker_running ? 'فرآیند بررسی دیتابیس فعال است' : `صف فرمان: ${data.command_queue.toLocaleString('fa-IR')} مورد`);
+        $('side-status').textContent = statusText(data.system_status);$('connection').classList.toggle('offline', !data.database_connected);
+        const point = $('engine-point');
+        point.className = `status-point ${data.system_status === 'Offline' ? '' : data.checker_running || data.file_checker_running || data.system_status === 'Registering' ? 'busy' : 'active'}`;
+      } catch (error) {
+        $('connection').classList.add('offline');$('side-status').textContent = 'اتصال دیتابیس برقرار نیست';
+        $('engine-status').textContent = 'اتصال برقرار نشد';
+      }
     }
+
     async function loadLogs() {
-      try { const data = await api('/api/logs'); const signature = JSON.stringify(data.logs); if (signature === logSignature) return; logSignature = signature; $('logs').innerHTML = data.logs.length ? data.logs.map(item => `<div class="log-row"><span class="log-time">[${escapeHtml(item.timestamp)}]</span>${escapeHtml(item.message)}</div>`).join('') : '<div style="color:#7186a3">گزارشی ثبت نشده است.</div>'; $('logs').scrollTop = $('logs').scrollHeight; } catch (error) {}
+      try {
+        const data = await api('/api/logs');
+        const signature = JSON.stringify(data.logs);
+        if (signature === logSignature) return;
+        logSignature = signature;
+        $('logs').innerHTML = data.logs.length ? data.logs.map(item => `<div class="log-row"><span class="log-time">[${escapeHtml(item.timestamp)}]</span>${escapeHtml(item.message)}</div>`).join('') : '<div style="color:#7186a3">گزارشی ثبت نشده است.</div>';
+        $('logs').scrollTop =$('logs').scrollHeight;
+      } catch (error) {}
     }
+
     async function startBulk() { try { const data = await api('/api/action/start', {method:'POST'}); toast(data.message); loadStats(); } catch (error) { toast(error.message, true); } }
     async function stopChecker() { try { const data = await api('/api/checker/stop', {method:'POST'}); toast(data.message); loadStats(); } catch (error) { toast(error.message, true); } }
     async function clearLogs() { try { const data = await api('/api/action/clear_logs', {method:'POST'}); logSignature = ''; toast(data.message); loadLogs(); } catch (error) { toast(error.message, true); } }
-    function openChecker() { openModal('checker-modal'); } function submitChecker() { const start = Math.max(1, parseInt($('checker-start').value) || 1), end = Math.max(start, parseInt($('checker-end').value) || 200); api('/api/checker/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start_idx:start,end_idx:end})}).then(data => { closeModal('checker-modal'); toast(data.message); loadStats(); }).catch(error => toast(error.message, true)); }
-    function switchAccounts(type) { accountType = type; $('tab-normal').classList.toggle('active', type === 'normal'); $('tab-ordered').classList.toggle('active', type === 'ordered'); loadAccounts(); }
+    function openChecker() { openModal('checker-modal'); }
+    function submitChecker() {
+      const start = Math.max(1, parseInt($('checker-start').value) \vert{}\vert{} 1), end = Math.max(start, parseInt($('checker-end').value) || 200);
+      api('/api/checker/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start_idx:start,end_idx:end})}).then(data => { closeModal('checker-modal'); toast(data.message); loadStats(); }).catch(error => toast(error.message, true));
+    }
+
+    function switchAccounts(type) { accountType = type; $('tab-normal').classList.toggle('active', type === 'normal');$('tab-ordered').classList.toggle('active', type === 'ordered'); loadAccounts(); }
     function debouncedAccounts() { clearTimeout(searchTimer); searchTimer = setTimeout(loadAccounts, 250); }
     function linkCell(row) { return `<div class="link-cell"><span class="link-value" title="${escapeHtml(row.link)}">${escapeHtml(row.link)}</span><button class="copy-btn" onclick="copyLink('${encodeURIComponent(row.link)}')">کپی</button></div>`; }
     function renderAccounts() {
@@ -240,14 +380,183 @@
     async function loadAccounts() { try { const q = encodeURIComponent($('account-search').value || ''); const data = await api(`/api/accounts/${accountType}?q=${q}`); accounts = data.data; renderAccounts(); } catch (error) { toast(error.message, true); } }
     async function copyLink(value) { try { await navigator.clipboard.writeText(decodeURIComponent(value)); toast('لینک کپی شد.'); } catch (error) { toast('کپی لینک انجام نشد.', true); } }
     async function copyAllLinks() { if (!accounts.length) return toast('لینکی برای کپی وجود ندارد.', true); try { await navigator.clipboard.writeText(accounts.map(row => row.link).join('\n')); toast(`${accounts.length.toLocaleString('fa-IR')} لینک کپی شد.`); } catch (error) { toast('کپی لینک‌ها انجام نشد.', true); } }
-    function openRowActions(phone) { const decoded = decodeURIComponent(phone); $('confirm-title').textContent = 'مدیریت حساب'; $('confirm-text').textContent = `می‌توانید لینک ورود حساب ${decoded} را باطل کنید یا کل رکورد حساب را حذف کنید.`; $('confirm-action').textContent = 'ابطال لینک'; $('confirm-action').onclick = () => revokeLink(decoded); $('delete-action').onclick = () => deleteAccount(decoded); openModal('confirm-modal'); }
+    function openRowActions(phone) { const decoded = decodeURIComponent(phone); $('confirm-title').textContent = 'مدیریت حساب'; $('confirm-text').textContent = `می‌توانید لینک ورود حساب ${decoded} را باطل کنید یا کل رکورد حساب را حذف کنید.`; $('confirm-action').textContent = 'ابطال لینک'; $('confirm-action').onclick = () => revokeLink(decoded);$('delete-action').onclick = () => deleteAccount(decoded); openModal('confirm-modal'); }
     async function revokeLink(phone) { closeModal('confirm-modal'); try { const data = await api('/api/action/revoke_link', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone})}); toast(data.message); loadAccounts(); } catch (error) { toast(error.message, true); } }
     async function deleteAccount(phone) { if (!window.confirm(`رکورد حساب ${phone} حذف شود؟ این کار نشست لینک را هم حذف می‌کند.`)) return; closeModal('confirm-modal'); try { const data = await api('/api/action/delete_account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone})}); toast(data.message, data.status !== 'ok'); loadAccounts(); loadStats(); loadDatabase(); } catch (error) { toast(error.message, true); } }
     function downloadExport(format) { window.location.href = `/api/export/${accountType}/${format}?q=${encodeURIComponent($('account-search').value || '')}`; }
-    async function loadDatabase() { try { const data = await api('/api/database/overview'); $('session-count').textContent = data.sessions.toLocaleString('fa-IR'); $('db-list').innerHTML = data.items.map(item => `<div class="db-row"><div><div class="db-label">${escapeHtml(item.label)}</div><div class="db-key">${escapeHtml(item.key)}</div></div><span class="db-count">${item.size.toLocaleString('fa-IR')} مورد</span></div>`).join(''); } catch (error) { $('db-list').innerHTML = '<div class="empty">اطلاعات دیتابیس قابل دریافت نیست.</div>'; } }
+    async function loadDatabase() { try { const data = await api('/api/database/overview'); $('session-count').textContent = data.sessions.toLocaleString('fa-IR');$('db-list').innerHTML = data.items.map(item => `<div class="db-row"><div><div class="db-label">${escapeHtml(item.label)}</div><div class="db-key">${escapeHtml(item.key)}</div></div><span class="db-count">${item.size.toLocaleString('fa-IR')} مورد</span></div>`).join(''); } catch (error) { $('db-list').innerHTML = '<div class="empty">اطلاعات دیتابیس قابل دریافت نیست.</div>'; } }
     function askWipe() { openModal('wipe-modal'); }
     async function wipeDatabase() { if ($('wipe-code').value !== 'NEXUS-WIPE-ALL') return toast('عبارت تأیید درست نیست.', true); try { const data = await api('/api/action/clean', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:$('wipe-code').value})}); closeModal('wipe-modal'); toast(data.message); loadStats(); loadDatabase(); loadAccounts(); } catch (error) { toast(error.message, true); } }
+
+    /* ================= منطق بررسی فایل متنی لینک‌ها ================= */
+    function handleFileChosen(input) {
+      if (input.files && input.files[0]) {
+        $('file-drop-label').textContent = `فایل انتخاب‌شده: ${input.files[0].name}`;
+      }
+    }
+
+    function clearFileInputs() {
+      $('file-input').value = '';
+      $('links-text').value = '';$('file-drop-label').textContent = 'برای انتخاب فایل TXT کلیک کنید';
+    }
+
+    async function submitFileChecker() {
+      const fileInput = $('file-input');
+      const textVal = $('links-text').value.trim();
+      let formData = new FormData();
+
+      if (fileInput.files && fileInput.files[0]) {
+        formData.append('file', fileInput.files[0]);
+      } else if (textVal) {
+        formData.append('text', textVal);
+      } else {
+        return toast('لطفاً یک فایل TXT انتخاب کنید یا لینک‌ها را در کادر متنی وارد نمایید.', true);
+      }
+
+      $('file-start-btn').disabled = true;
+      try {
+        const res = await fetch('/api/file_checker/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.message || data.error || 'ارسال فایل ناموفق بود.');
+
+        currentJobId = data.job_id;
+        toast(data.message);
+        $('file-stop-btn').style.display = 'inline-block';$('file-status-note').textContent = `بررسی شروع شد (تعداد کل: ${data.total} لینک)`;
+        pollFileStatus();
+        loadStats();
+      } catch (err) {
+        toast(err.message, true);
+        $('file-start-btn').disabled = false;
+      }
+    }
+
+    function pollFileStatus() {
+      clearInterval(fileJobTimer);
+      fileJobTimer = setInterval(async () => {
+        if (!currentJobId) return clearInterval(fileJobTimer);
+        try {
+          const res = await api(`/api/file_checker/status/${currentJobId}`);
+          const job = res.job;
+
+          const total = job.total || 1;
+          const checked = job.checked || 0;
+          const percent = Math.min(100, Math.round((checked / total) * 100));
+
+          $('file-progress-bar').style.width = `${percent}%`;
+          $('file-progress-text').textContent = `${percent.toLocaleString('fa-IR')}٪`;
+          $('file-progress-counts').textContent = `${checked.toLocaleString('fa-IR')} از ${total.toLocaleString('fa-IR')} لینک`;
+
+          $('fstat-ordered').textContent = (job.ordered || 0).toLocaleString('fa-IR');
+          $('fstat-clean').textContent = (job.clean \vert{}\vert{} 0).toLocaleString('fa-IR');$('fstat-invalid').textContent = (job.invalid || 0).toLocaleString('fa-IR');
+
+          if (job.status === 'running') {
+            $('file-status-note').textContent = `در حال بررسی با پروکسی... (${checked} از ${total})`;
+          } else if (job.status === 'completed' || job.status === 'stopped' || job.status === 'failed') {
+            clearInterval(fileJobTimer);
+            $('file-start-btn').disabled = false;
+            $('file-stop-btn').style.display = 'none';$('file-status-note').textContent = job.status === 'completed' ? 'عملیات بررسی با موفقیت به پایان رسید.' : (job.status === 'stopped' ? 'عملیات توسط کاربر متوقف شد.' : 'عملیات با خطا مواجه شد.');
+            loadJobResults();
+            loadStats();
+          }
+        } catch (e) {
+          clearInterval(fileJobTimer);
+          $('file-start-btn').disabled = false;
+          $('file-stop-btn').style.display = 'none';
+        }
+      }, 1500);
+    }
+
+    async function stopFileChecker() {
+      try {
+        const data = await api('/api/file_checker/stop', { method: 'POST' });
+        toast(data.message);
+        $('file-stop-btn').style.display = 'none';
+        loadStats();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    }
+
+    async function loadJobResults() {
+      if (!currentJobId) return;
+      try {
+        const data = await api(`/api/file_checker/result/${currentJobId}`);
+        fileResults = {
+          ordered: data.ordered || [],
+          clean: data.clean || [],
+          invalid: data.invalid || []
+        };
+        $('ftab-cnt-ordered').textContent = fileResults.ordered.length.toLocaleString('fa-IR');
+        $('ftab-cnt-clean').textContent = fileResults.clean.length.toLocaleString('fa-IR');$('ftab-cnt-invalid').textContent = fileResults.invalid.length.toLocaleString('fa-IR');
+        renderFileTab();
+      } catch (e) {
+        toast('خطا در دریافت نتایج بررسی فایل', true);
+      }
+    }
+
+    function switchFileTab(tab) {
+      currentFileTab = tab;
+      ['ordered', 'clean', 'invalid'].forEach(t => {
+        $(`ftab-${t}`).classList.toggle('active', t === tab);
+      });
+      renderFileTab();
+    }
+
+    function renderFileTab() {
+      const list = fileResults[currentFileTab] || [];
+      const tbody = $('file-results-body');
+
+      if (!list.length) {
+        tbody.innerHTML = '<tr><td class="empty" colspan="6">موردی در این دسته یافت نشد.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = list.map((item, idx) => {
+        const linkStr = item.link || (item.token ? `${window.location.origin}/auth/${item.token}` : '—');
+        const phoneStr = item.phone || '—';
+        const orders = item.orders !== undefined ? item.orders : 0;
+        let badge = '<span class="pill pill-green">دارای خرید</span>';
+        if (currentFileTab === 'clean') badge = '<span class="pill pill-gray">خام (بدون سفارش)</span>';
+        if (currentFileTab === 'invalid') badge = `<span class="pill pill-red">${escapeHtml(item.error || 'نامعتبر')}</span>`;
+
+        return `
+          <tr>
+            <td class="row-index">${(idx + 1).toLocaleString('fa-IR')}</td>
+            <td class="phone">${escapeHtml(phoneStr)}</td>
+            <td style="font-weight:700;">${orders.toLocaleString('fa-IR')}</td>
+            <td>${badge}</td>
+            <td>
+              <div class="link-cell">
+                <span class="link-value" title="${escapeHtml(linkStr)}">${escapeHtml(linkStr)}</span>
+                <button class="copy-btn" onclick="copyLink('${encodeURIComponent(linkStr)}')">کپی</button>
+              </div>
+            </td>
+            <td>
+              <button class="more-btn" onclick="copyLink('${encodeURIComponent(linkStr)}')">کپی لینک</button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    async function copyCurrentFileLinks() {
+      const list = fileResults[currentFileTab] || [];
+      if (!list.length) return toast('لینکی در این بخش برای کپی وجود ندارد.', true);
+      const links = list.map(item => item.link || (item.token ? `${window.location.origin}/auth/${item.token}` : '')).filter(Boolean);
+      try {
+        await navigator.clipboard.writeText(links.join('\n'));
+        toast(`${links.length.toLocaleString('fa-IR')} لینک کپی شد.`);
+      } catch (err) {
+        toast('کپی لینک‌ها انجام نشد.', true);
+      }
+    }
+
+    function downloadFileExport() {
+      if (!currentJobId) return toast('ابتدا فایلی را برای بررسی ثبت کنید.', true);
+      window.location.href = `/api/file_checker/export/${currentJobId}/${currentFileTab}`;
+    }
+
     loadStats(); loadLogs(); setInterval(loadStats, 5000); setInterval(loadLogs, 5000);
   </script>
 </body>
-  </html>
+</html>
