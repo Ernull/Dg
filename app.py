@@ -1,12 +1,14 @@
 """پنل مدیریت Bridge
 
-این فایل فقط لایهٔ مدیریت و رابط وب است. قراردادهای Redis عمداً با Bridge/bx.py
-هماهنگ نگه داشته شده‌اند تا موتور ثبت‌نام بدون تغییر کار کند.
+این فایل لایهٔ مدیریت و رابط وب است. قابلیت دریافت فایل TXT لینک‌ها،
+ارسال فرمان بررسی سابقه خرید به موتور و تفکیک و خروجی لینک‌های خریددار
+و بدون خرید اضافه شده است.
 """
 import csv
 import io
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -45,8 +47,6 @@ except Exception:
 
 
 # ================= Token Worker =================
-# این worker همان رفتار قبلی را حفظ می‌کند: حساب جدید را از صف می‌خواند،
-# session را می‌سازد و رکورد مدیریتی را در hash قرار می‌دهد.
 def token_worker():
     while True:
         if db:
@@ -161,6 +161,20 @@ def parse_account(raw, fallback_phone=""):
         return {"phone": fallback_phone, "name": "", "created_at": "", "total_orders": 0}
 
 
+def extract_token_from_line(line):
+    """استخراج امن توکن سشن از داخل URL یا خط متنی خام"""
+    line = (line or "").strip()
+    if not line:
+        return None, None
+    match = re.search(r"/auth/([a-zA-Z0-9_\-]+)", line)
+    if match:
+        return match.group(1), line
+    match = re.search(r"\b([a-zA-Z0-9_\-]{14,64})\b", line)
+    if match:
+        return match.group(1), line
+    return None, line
+
+
 def account_rows(acc_type, query=""):
     if not db_or_empty():
         return []
@@ -176,7 +190,6 @@ def account_rows(acc_type, query=""):
     query = (query or "").strip().lower()
     rows = []
 
-    # One pipeline avoids one Redis round-trip per account when checking links.
     pipe = db.pipeline(transaction=False)
     usable = []
     for phone, raw in sorted_records:
@@ -285,6 +298,7 @@ def get_stats():
                 "active_proxies": 0,
                 "system_status": "Offline",
                 "checker_running": False,
+                "file_checker_running": False,
                 "new_accounts_queue": 0,
                 "command_queue": 0,
                 "database_connected": False,
@@ -295,6 +309,7 @@ def get_stats():
     total_ordered = db.hlen("jet:ordered_accounts")
     active_proxies = db.get("nexus:active_proxies")
     is_checking = db.get("nexus:checker_running") == "1"
+    is_file_checking = db.get("nexus:file_checker_running") == "1"
     last_cmd = db.lindex("bot:admin_commands", -1)
 
     engine_alive = False
@@ -303,8 +318,10 @@ def get_stats():
     except Exception:
         pass
 
-    if not engine_alive and not is_checking:
+    if not engine_alive and not is_checking and not is_file_checking:
         status = "Offline"
+    elif is_file_checking:
+        status = "CheckingFile"
     elif is_checking:
         status = "Checking"
     elif last_cmd and "START_BULK" in last_cmd:
@@ -319,6 +336,7 @@ def get_stats():
             "active_proxies": int(active_proxies) if active_proxies else 0,
             "system_status": status,
             "checker_running": is_checking,
+            "file_checker_running": is_file_checking,
             "new_accounts_queue": db.llen("bot:new_accounts"),
             "command_queue": db.llen("bot:admin_commands"),
             "database_connected": True,
@@ -390,6 +408,169 @@ def export_accounts(acc_type, file_format):
     )
 
 
+# ================= File Link Checker APIs =================
+@app.route("/api/file_checker/upload", methods=["POST"])
+@protected
+def file_checker_upload():
+    if not db:
+        return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
+
+    raw_text = ""
+    if "file" in request.files:
+        uploaded_file = request.files["file"]
+        if uploaded_file.filename:
+            raw_text = uploaded_file.read().decode("utf-8", errors="ignore")
+    elif request.is_json:
+        raw_text = (request.json or {}).get("text", "")
+    else:
+        raw_text = request.form.get("text", "")
+
+    raw_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    if not raw_lines:
+        return jsonify({"error": "فایل یا متن ارسالی خالی است یا لینکی در آن یافت نشد."}), 400
+
+    items = []
+    seen_tokens = set()
+    for line in raw_lines:
+        token, original_link = extract_token_from_line(line)
+        if token and token not in seen_tokens:
+            seen_tokens.add(token)
+            items.append({"token": token, "link": original_link})
+
+    if not items:
+        return jsonify({"error": "هیچ لینک یا توکن معتبری در ورودی یافت نشد."}), 400
+
+    job_id = secrets.token_hex(6)
+    job_key = f"nexus:file_job:{job_id}"
+    items_key = f"nexus:file_job_items:{job_id}"
+
+    # پاک‌سازی و ذخیره آیتم‌ها
+    pipe = db.pipeline(transaction=True)
+    pipe.delete(items_key)
+    pipe.delete(f"nexus:file_job_ordered:{job_id}")
+    pipe.delete(f"nexus:file_job_clean:{job_id}")
+    pipe.delete(f"nexus:file_job_invalid:{job_id}")
+
+    for item in items:
+        pipe.rpush(items_key, json.dumps(item, ensure_ascii=False))
+
+    job_meta = {
+        "id": job_id,
+        "status": "pending",
+        "total": len(items),
+        "checked": 0,
+        "ordered": 0,
+        "clean": 0,
+        "invalid": 0,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    pipe.set(job_key, json.dumps(job_meta, ensure_ascii=False))
+    pipe.set("nexus:latest_file_job", job_id)
+    pipe.execute()
+
+    # ارسال فرمان به موتور پردازشگر
+    db.rpush("bot:admin_commands", f"CHECK_FILE:{job_id}")
+
+    return jsonify({
+        "status": "ok",
+        "message": f"تعداد {len(items)} لینک با موفقیت ثبت شد و بررسی آغاز گردید.",
+        "job_id": job_id,
+        "total": len(items),
+    })
+
+
+@app.route("/api/file_checker/status/<job_id>")
+@protected
+def file_checker_status(job_id):
+    if not db:
+        return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
+
+    job_raw = db.get(f"nexus:file_job:{job_id}")
+    if not job_raw:
+        return jsonify({"error": "تسک مورد نظر یافت نشد."}), 404
+
+    try:
+        job = json.loads(job_raw)
+    except Exception:
+        return jsonify({"error": "خطا در خواندن اطلاعات تسک."}), 500
+
+    return jsonify({"status": "ok", "job": job})
+
+
+@app.route("/api/file_checker/result/<job_id>")
+@protected
+def file_checker_result(job_id):
+    if not db:
+        return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
+
+    job_raw = db.get(f"nexus:file_job:{job_id}")
+    if not job_raw:
+        return jsonify({"error": "تسک یافت نشد."}), 404
+
+    def parse_list(key):
+        items = db.lrange(key, 0, -1)
+        res = []
+        for x in items:
+            try:
+                res.append(json.loads(x))
+            except Exception:
+                res.append({"link": str(x)})
+        return res
+
+    ordered = parse_list(f"nexus:file_job_ordered:{job_id}")
+    clean = parse_list(f"nexus:file_job_clean:{job_id}")
+    invalid = parse_list(f"nexus:file_job_invalid:{job_id}")
+
+    return jsonify({
+        "status": "ok",
+        "job_id": job_id,
+        "ordered": ordered,
+        "clean": clean,
+        "invalid": invalid,
+    })
+
+
+@app.route("/api/file_checker/export/<job_id>/<category>")
+@protected
+def export_file_checker(job_id, category):
+    if not db:
+        return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
+
+    if category not in {"ordered", "clean", "invalid"}:
+        return jsonify({"error": "دسته‌بندی نامعتبر است."}), 400
+
+    raw_items = db.lrange(f"nexus:file_job_{category}:{job_id}", 0, -1)
+    links = []
+    for raw in raw_items:
+        try:
+            data = json.loads(raw)
+            link_val = data.get("link") or (f"{WEBHOOK_URL}/auth/{data.get('token')}" if data.get("token") else "")
+            if link_val:
+                links.append(link_val)
+        except Exception:
+            if raw:
+                links.append(str(raw))
+
+    content = "\n".join(links)
+    category_fa = {"ordered": "daraye-kharid", "clean": "bedone-kharid", "invalid": "namotabar"}.get(category, category)
+    filename = f"links-{category_fa}-{job_id}.txt"
+
+    return Response(
+        content,
+        mimetype="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route("/api/file_checker/stop", methods=["POST"])
+@protected
+def stop_file_checker():
+    if not db:
+        return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
+    db.set("nexus:file_checker_stop", "1")
+    return jsonify({"status": "ok", "message": "سیگنال توقف برای بررسی فایل ارسال شد."})
+
+
 # ================= Engine actions =================
 @app.route("/api/checker/start", methods=["POST"])
 @protected
@@ -444,6 +625,8 @@ def handle_action(cmd):
             "nexus:checker_logs",
         )
         for key in db.scan_iter(match="jet_session:*", count=500):
+            db.delete(key)
+        for key in db.scan_iter(match="nexus:file_job*", count=500):
             db.delete(key)
         return jsonify({"status": "ok", "message": "داده‌های مدیریتی و نشست‌ها پاک شدند."})
     return jsonify({"status": "error", "message": "فرمان ناشناخته است."}), 404
@@ -518,3 +701,4 @@ def secure_gateway(token):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
