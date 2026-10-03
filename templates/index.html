@@ -209,6 +209,7 @@
       <div id="txt-progress" style="display:none; margin-bottom:15px; font-size:12px; color:var(--blue);">
         در حال ارتباط با موتور بررسی...
         <div id="txt-stats" style="margin-top:5px; color:var(--muted); font-weight:700;">منتظر شروع عملیات...</div>
+        <button class="btn btn-danger" onclick="stopChecker()" style="margin-top:10px">توقف بررسی</button>
       </div>
       <div class="modal-actions" id="txt-actions">
         <button class="btn btn-light" onclick="closeModal('txt-modal')">انصراف</button>
@@ -217,6 +218,7 @@
       <div class="modal-actions" id="txt-download-actions" style="display:none; flex-direction:column; gap:8px; margin-top:20px;">
         <button class="btn btn-primary" onclick="downloadJobResults('ordered')" style="width:100%">دانلود لینک‌های دارای خرید (⭐)</button>
         <button class="btn btn-light" onclick="downloadJobResults('clean')" style="width:100%">دانلود لینک‌های خام (⚪)</button>
+        <button class="btn btn-light" onclick="downloadJobResults('invalid')" style="width:100%">دانلود لینک‌های نامعتبر</button>
         <button class="btn btn-danger" onclick="closeModal('txt-modal')" style="width:100%; border:none; background:transparent;">بستن این پنجره</button>
       </div>
     </div>
@@ -237,7 +239,7 @@
     const $ = id => document.getElementById(id);
     const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[ch]));
     function toast(message, error = false) { const el = $('toast'); el.textContent = message; el.className = `toast show${error ? ' error' : ''}`; clearTimeout(window.toastTimer); window.toastTimer = setTimeout(() => el.className = 'toast', 3200); }
-    async function api(url, options = {}) { const response = await fetch(url, options); const data = await response.json(); if (!response.ok) throw new Error(data.message || data.error || 'عملیات انجام نشد.'); return data; }
+    async function api(url, options = {}) { const response = await fetch(url, options); let data; try { data = await response.json(); } catch { throw new Error(`پاسخ نامعتبر از سرور (${response.status})`); } if (!response.ok) throw new Error(data.message || data.error || 'عملیات انجام نشد.'); return data; }
     function openModal(id) { $(id).classList.add('open'); } function closeModal(id) {$(id).classList.remove('open'); if(id==='txt-modal') clearInterval(jobPollTimer); }
     function switchView(view) { currentView = view; document.querySelectorAll('.view').forEach(el => el.classList.toggle('active', el.id === `view-${view}`)); document.querySelectorAll('.nav-btn').forEach(el => el.classList.toggle('active', el.dataset.view === view)); $('page-title').textContent = viewMeta[view][0];$('page-subtitle').textContent = viewMeta[view][1]; if (view === 'accounts') loadAccounts(); if (view === 'database') loadDatabase(); }
     document.querySelectorAll('.nav-btn').forEach(btn => btn.addEventListener('click', () => switchView(btn.dataset.view)));
@@ -261,7 +263,7 @@
     async function startBulk() { try { const data = await api('/api/action/start', {method:'POST'}); toast(data.message); loadStats(); } catch (error) { toast(error.message, true); } }
     async function stopChecker() { try { const data = await api('/api/checker/stop', {method:'POST'}); toast(data.message); loadStats(); } catch (error) { toast(error.message, true); } }
     async function clearLogs() { try { const data = await api('/api/action/clear_logs', {method:'POST'}); logSignature = ''; toast(data.message); loadLogs(); } catch (error) { toast(error.message, true); } }
-    function openChecker() { openModal('checker-modal'); } function submitChecker() { const start = Math.max(1, parseInt($('checker-start').value) \vert{}\vert{} 1), end = Math.max(start, parseInt($('checker-end').value) || 200); api('/api/checker/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start_idx:start,end_idx:end})}).then(data => { closeModal('checker-modal'); toast(data.message); loadStats(); }).catch(error => toast(error.message, true)); }
+    function openChecker() { openModal('checker-modal'); } function submitChecker() { const start = Math.max(1, parseInt($('checker-start').value) || 1), end = Math.max(start, parseInt($('checker-end').value) || 200); api('/api/checker/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start_idx:start,end_idx:end})}).then(data => { closeModal('checker-modal'); toast(data.message); loadStats(); }).catch(error => toast(error.message, true)); }
     
     function openFileChecker() {
         $('txt-file').value = '';$('txt-progress').style.display = 'none';
@@ -289,16 +291,19 @@
         if (!currentJobId) return;
         try {
             const data = await api(`/api/checker/job_status/${currentJobId}`);
-            if (data.status === 'done') {
+            if (data.status === 'completed') {
                 clearInterval(jobPollTimer);
                 $('txt-progress').style.display = 'none';$('txt-download-actions').style.display = 'flex';
                 toast('بررسی فایل به پایان رسید.');
-            } else if (data.status === 'error') {
+            } else if (['failed', 'stopped', 'not_found'].includes(data.status)) {
                 clearInterval(jobPollTimer);
-                $('txt-stats').textContent = 'خطا در بررسی فایل.';
-                toast('عملیات بررسی متوقف شد.', true);
+                $('txt-stats').textContent = data.status === 'not_found' ? 'کار بررسی در موتور پیدا نشد.' : data.status === 'stopped' ? 'بررسی فایل متوقف شد.' : 'بررسی فایل ناموفق بود.';
+                if (data.checked > 0) {
+                    $('txt-progress').style.display = 'none';$('txt-download-actions').style.display = 'flex';
+                }
+                toast($('txt-stats').textContent, data.status !== 'stopped');
             } else {
-                $('txt-stats').textContent = `تعداد بررسی شده: (خریددار: ${data.ordered} | خام: ${data.clean} | خطا: ${data.errors})`;
+                $('txt-stats').textContent = `بررسی‌شده: ${data.checked} از ${data.total} (دارای خرید: ${data.ordered} | خام: ${data.clean} | نامعتبر: ${data.invalid})`;
             }
         } catch (e) {}
     }
@@ -322,10 +327,11 @@
     async function revokeLink(phone) { closeModal('confirm-modal'); try { const data = await api('/api/action/revoke_link', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone})}); toast(data.message); loadAccounts(); } catch (error) { toast(error.message, true); } }
     async function deleteAccount(phone) { if (!window.confirm(`رکورد حساب ${phone} حذف شود؟ این کار نشست لینک را هم حذف می‌کند.`)) return; closeModal('confirm-modal'); try { const data = await api('/api/action/delete_account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone})}); toast(data.message, data.status !== 'ok'); loadAccounts(); loadStats(); loadDatabase(); } catch (error) { toast(error.message, true); } }
     function downloadExport(format) { window.location.href = `/api/export/${accountType}/${format}?q=${encodeURIComponent($('account-search').value || '')}`; }
-    async function loadDatabase() { try { const data = await api('/api/database/overview'); $('session-count').textContent = data.sessions.toLocaleString('fa-IR');$('db-list').innerHTML = data.items.map(item => `<div class="db-row"><div><div class="db-label">${escapeHtml(item.label)}</div><div class="db-key">${escapeHtml(item.key)}</div></div><span class="db-count">${item.size.toLocaleString('fa-IR')} مورد</span></div>`).join(''); } catch (error) { $('db-list').innerHTML = '<div class="empty">اطلاعات دیتابیس قابل دریافت نیست.</div>'; } }
+    async function loadDatabase() { try { const data = await api('/api/database/overview'); if (!data.connected) throw new Error(data.error || 'اتصال Redis برقرار نیست.'); $('session-count').textContent = data.sessions.toLocaleString('fa-IR'); $('db-list').innerHTML = data.items.length ? data.items.map(item => `<div class="db-row"><div><div class="db-label">${escapeHtml(item.label)}</div><div class="db-key">${escapeHtml(item.key)}</div></div><span class="db-count">${item.size.toLocaleString('fa-IR')} مورد</span></div>`).join('') : '<div class="empty">کلیدی برای نمایش وجود ندارد.</div>'; } catch (error) { $('session-count').textContent = '—'; $('db-list').innerHTML = `<div class="empty">${escapeHtml(error.message || 'اطلاعات دیتابیس قابل دریافت نیست.')}</div>`; } }
     function askWipe() { openModal('wipe-modal'); }
     async function wipeDatabase() { if ($('wipe-code').value !== 'NEXUS-WIPE-ALL') return toast('عبارت تأیید درست نیست.', true); try { const data = await api('/api/action/clean', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:$('wipe-code').value})}); closeModal('wipe-modal'); toast(data.message); loadStats(); loadDatabase(); loadAccounts(); } catch (error) { toast(error.message, true); } }
     loadStats(); loadLogs(); setInterval(loadStats, 5000); setInterval(loadLogs, 5000);
   </script>
 </body>
 </html>
+
