@@ -29,18 +29,27 @@ from flask import (
 app = Flask(__name__, template_folder=os.path.join(os.path.dirname(__file__), "templates"))
 app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(24))
 
-REDIS_URL = os.environ.get(
-    "REDIS_URL",
-    "redis://default:fuHrGqESMbVVRciLtcxCzsKaeUdGnrOU@interchange.proxy.rlwy.net:58097",
-)
+REDIS_URL = os.environ.get("REDIS_URL")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://your-domain.com").rstrip("/")
-ADMIN_PASS = os.environ.get("ADMIN_PASS", "admin123")
+ADMIN_PASS = os.environ.get("ADMIN_PASS")
 APP_SECRET_HEADER = "JetApp-Secure-Client"
 
 try:
-    db = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-    db.ping()
-except Exception:
+    # Keep the client if Redis is temporarily unavailable; redis-py can reconnect
+    # on later requests instead of leaving the app disconnected for its lifetime.
+    db = (
+        redis.Redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=10,
+            health_check_interval=30,
+        )
+        if REDIS_URL
+        else None
+    )
+except (ValueError, redis.RedisError) as exc:
+    app.logger.error("Could not configure Redis client: %s", exc)
     db = None
 
 
@@ -140,7 +149,14 @@ def protected(view):
     def wrapped(*args, **kwargs):
         if not session.get("logged_in"):
             return jsonify({"error": "Unauthorized"}), 401
-        return view(*args, **kwargs)
+        if db is None:
+            return jsonify({"error": "متغیر REDIS_URL در تنظیمات سرور تعریف نشده است."}), 503
+        try:
+            db.ping()
+            return view(*args, **kwargs)
+        except redis.RedisError:
+            app.logger.exception("Redis request failed")
+            return jsonify({"error": "اتصال Redis برقرار نشد؛ تنظیم REDIS_URL را بررسی کنید."}), 503
 
     return wrapped
 
@@ -251,12 +267,16 @@ def database_snapshot():
 @app.route("/")
 def index():
     if not session.get("logged_in"):
+        if not ADMIN_PASS:
+            return login_page("تنظیم ADMIN_PASS در متغیرهای محیطی سرور الزامی است."), 503
         return login_page()
     return render_template("index.html")
 
 
 @app.route("/login", methods=["POST"])
 def login():
+    if not ADMIN_PASS:
+        return login_page("تنظیم ADMIN_PASS در متغیرهای محیطی سرور الزامی است."), 503
     if request.form.get("password") == ADMIN_PASS:
         session["logged_in"] = True
         session.permanent = True
@@ -291,7 +311,10 @@ def get_stats():
     total_normal = db.hlen("jet:bulk_accounts")
     total_ordered = db.hlen("jet:ordered_accounts")
     active_proxies = db.get("nexus:active_proxies")
-    is_checking = db.get("nexus:checker_running") == "1"
+    is_checking = (
+        db.get("nexus:checker_running") == "1"
+        or db.get("nexus:file_checker_running") == "1"
+    )
     last_cmd = db.lindex("bot:admin_commands", -1)
 
     engine_alive = False
@@ -412,38 +435,69 @@ def upload_txt():
     file = request.files['file']
     content = file.read().decode('utf-8', errors='ignore').splitlines()
 
-    tokens = []
+    items = []
     for line in content:
-        line = line.strip()
-        if "/auth/" in line:
-            token = line.split("/auth/")[-1].strip()
-            if token:
-                tokens.append(token)
+        link = line.strip()
+        if "/auth/" not in link:
+            continue
+        token = link.split("/auth/", 1)[1].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        if token:
+            items.append({"token": token, "link": link})
 
-    if not tokens:
+    if not items:
         return jsonify({"error": "هیچ لینکی در فایل یافت نشد."}), 400
 
     job_id = secrets.token_hex(8)
-    db.delete(f"nexus:job:{job_id}:tokens")
-    db.rpush(f"nexus:job:{job_id}:tokens", *tokens)
-    db.set(f"nexus:job:{job_id}:status", "pending")
-    db.rpush("bot:admin_commands", f"START_TXT_CHECKER:{job_id}")
+    job_key = f"nexus:file_job:{job_id}"
+    items_key = f"nexus:file_job_items:{job_id}"
+    db.delete(
+        job_key,
+        items_key,
+        f"nexus:file_job_ordered:{job_id}",
+        f"nexus:file_job_clean:{job_id}",
+        f"nexus:file_job_invalid:{job_id}",
+    )
+    db.rpush(
+        items_key,
+        *(json.dumps(item, ensure_ascii=False) for item in items),
+    )
+    db.set(
+        job_key,
+        json.dumps(
+            {
+                "status": "pending",
+                "total": len(items),
+                "checked": 0,
+                "ordered": 0,
+                "clean": 0,
+                "invalid": 0,
+            },
+            ensure_ascii=False,
+        ),
+    )
+    db.rpush("bot:admin_commands", f"CHECK_FILE:{job_id}")
 
-    return jsonify({"status": "ok", "message": f"{len(tokens)} لینک استخراج و برای بررسی ارسال شد.", "job_id": job_id})
+    return jsonify({"status": "ok", "message": f"{len(items)} لینک استخراج و برای بررسی ارسال شد.", "job_id": job_id})
 
 @app.route("/api/checker/job_status/<job_id>")
 @protected
 def job_status(job_id):
     if not db:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
-    status = db.get(f"nexus:job:{job_id}:status")
-    if not status:
+    job_raw = db.get(f"nexus:file_job:{job_id}")
+    if not job_raw:
         return jsonify({"status": "not_found"})
+    try:
+        job = json.loads(job_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "وضعیت بررسی فایل در دیتابیس معتبر نیست."}), 500
     return jsonify({
-        "status": status,
-        "ordered": db.llen(f"nexus:job:{job_id}:ordered"),
-        "clean": db.llen(f"nexus:job:{job_id}:clean"),
-        "errors": db.llen(f"nexus:job:{job_id}:errors")
+        "status": job.get("status", "pending"),
+        "total": int(job.get("total", 0)),
+        "checked": int(job.get("checked", 0)),
+        "ordered": int(job.get("ordered", 0)),
+        "clean": int(job.get("clean", 0)),
+        "invalid": int(job.get("invalid", 0)),
     })
 
 @app.route("/api/checker/job_download/<job_id>/<status>")
@@ -451,14 +505,29 @@ def job_status(job_id):
 def job_download(job_id, status):
     if not db:
         return "Server Error", 500
-    tokens = db.lrange(f"nexus:job:{job_id}:{status}", 0, -1)
+    result_keys = {
+        "ordered": f"nexus:file_job_ordered:{job_id}",
+        "clean": f"nexus:file_job_clean:{job_id}",
+        "invalid": f"nexus:file_job_invalid:{job_id}",
+    }
+    if status not in result_keys:
+        return jsonify({"error": "نوع نتیجهٔ درخواستی معتبر نیست."}), 400
+    if not db.exists(f"nexus:file_job:{job_id}"):
+        return jsonify({"error": "بررسی فایل پیدا نشد."}), 404
+
     stream = io.StringIO()
-    for t in tokens:
-        stream.write(f"{WEBHOOK_URL}/auth/{t}\n")
+    for raw_item in db.lrange(result_keys[status], 0, -1):
+        try:
+            item = json.loads(raw_item)
+        except (TypeError, ValueError):
+            continue
+        link = item.get("link") if isinstance(item, dict) else None
+        if link:
+            stream.write(f"{link}\n")
     return Response(
         stream.getvalue(),
         mimetype="text/plain; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename={status}_links.txt"}
+        headers={"Content-Disposition": f"attachment; filename={status}_links.txt"},
     )
 
 
@@ -468,7 +537,8 @@ def stop_checker():
     if not db:
         return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
     db.set("nexus:checker_stop", "1")
-    return jsonify({"status": "ok", "message": "درخواست توقف برای موتور ارسال شد."})
+    db.set("nexus:file_checker_stop", "1")
+    return jsonify({"status": "ok", "message": "درخواست توقف برای بررسی فعال ارسال شد."})
 
 
 @app.route("/api/action/clear_logs", methods=["POST"])
