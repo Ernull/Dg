@@ -570,6 +570,8 @@ def handle_action(cmd):
             "bot:admin_alerts",
             "bot:new_accounts",
             "nexus:checker_logs",
+            "nexus:uploaded_proxies",
+            "nexus:active_proxies",
         )
         for key in db.scan_iter(match="jet_session:*", count=500):
             db.delete(key)
@@ -620,6 +622,107 @@ def revoke_link():
                 db.delete(f"jet_session:{token}")
                 return jsonify({"status": "ok", "message": "لینک ورود این حساب باطل شد."})
     return jsonify({"status": "not_found", "message": "حسابی با این شماره پیدا نشد."}), 404
+
+
+# ================= Proxy Upload =================
+def parse_proxy_line(line: str):
+    """
+    فرمت‌های پشتیبانی‌شده:
+      host:port
+      user:pass@host:port          (pass می‌تواند شامل @ باشد)
+      http://user:pass@host:port
+      https://user:pass@host:port
+      socks5://user:pass@host:port
+      socks4://user:pass@host:port
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+
+    # جداسازی scheme
+    if "://" in line:
+        scheme, rest = line.split("://", 1)
+        scheme = scheme.lower()
+        if scheme not in ("http", "https", "socks5", "socks4"):
+            scheme = "http"
+    else:
+        scheme, rest = "http", line
+
+    # جداسازی auth از host:port با split از آخر (مقاوم در برابر @ در پسورد)
+    if "@" in rest:
+        auth, hostport = rest.rsplit("@", 1)
+    else:
+        auth, hostport = None, rest
+
+    # جداسازی host و port
+    try:
+        if hostport.startswith("["):  # IPv6
+            bracket_end = hostport.index("]")
+            host = hostport[1:bracket_end]
+            port = int(hostport[bracket_end + 2:])
+        else:
+            host, port_str = hostport.rsplit(":", 1)
+            port = int(port_str)
+        if not host or not (1 <= port <= 65535):
+            return None
+    except (ValueError, IndexError):
+        return None
+
+    if auth:
+        return f"{scheme}://{auth}@{host}:{port}"
+    return f"{scheme}://{host}:{port}"
+
+
+@app.route("/api/proxies/upload", methods=["POST"])
+@protected
+def upload_proxies():
+    if not db:
+        return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
+
+    replace = (request.args.get("replace", "1") != "0")
+
+    if "file" in request.files:
+        content = request.files["file"].read().decode("utf-8", errors="ignore")
+    elif request.content_type and "text" in request.content_type:
+        content = request.get_data(as_text=True)
+    else:
+        content = (request.json or {}).get("proxies", "")
+
+    lines = content.splitlines()
+    valid = list(dict.fromkeys(p for p in (parse_proxy_line(ln) for ln in lines) if p))
+
+    if not valid:
+        return jsonify({"error": "هیچ پروکسی معتبری در فایل یافت نشد."}), 400
+
+    if replace:
+        db.delete("nexus:uploaded_proxies")
+
+    db.rpush("nexus:uploaded_proxies", *valid)
+    db.set("nexus:active_proxies", db.llen("nexus:uploaded_proxies"))
+
+    return jsonify({
+        "status": "ok",
+        "message": f"{len(valid)} پروکسی با موفقیت بارگذاری شد.",
+        "count": len(valid),
+        "replaced": replace,
+    })
+
+
+@app.route("/api/proxies/clear", methods=["POST"])
+@protected
+def clear_proxies():
+    if not db:
+        return jsonify({"error": "اتصال دیتابیس برقرار نیست."}), 503
+    db.delete("nexus:uploaded_proxies", "nexus:active_proxies")
+    return jsonify({"status": "ok", "message": "لیست پروکسی‌های آپلودشده پاک شد."})
+
+
+@app.route("/api/proxies/count")
+@protected
+def proxy_count():
+    if not db:
+        return jsonify({"count": 0})
+    return jsonify({"count": db.llen("nexus:uploaded_proxies")})
 
 
 # ================= Client gateway =================
