@@ -169,7 +169,8 @@
                 <button class="engine-action primary" id="start-btn" onclick="startBulk()"><strong>شروع ثبت‌نام</strong><span>ارسال فرمان START_BULK</span></button>
                 <button class="engine-action" onclick="openChecker()"><strong>بررسی از دیتابیس</strong><span>بررسی حساب‌های خام</span></button>
                 <button class="engine-action" onclick="openFileChecker()"><strong>بررسی فایل (TXT)</strong><span>دریافت و جداسازی لینک‌ها</span></button>
-                <button class="engine-action" onclick="stopChecker()"><strong>توقف بررسی</strong><span>ارسال سیگنال توقف</span></button>
+                <button class="engine-action" onclick="openProxyUpload()"><strong>آپلود پروکسی</strong><span id="proxy-count-label">بارگذاری لیست پروکسی</span></button>
+                <button class="engine-action" onclick="stopChecker()" style="grid-column:1/-1"><strong>توقف بررسی</strong><span>ارسال سیگنال توقف</span></button>
               </div>
             </section>
             <section class="card log-card"><div class="section-head"><div><h2 class="section-title">آخرین گزارش‌ها</h2><p class="section-note">رویدادهای ثبت‌شده توسط موتور</p></div><div><button class="btn btn-light" onclick="clearLogs()" style="margin-left:5px">پاک‌سازی</button><button class="btn btn-light" onclick="loadLogs()">به‌روزرسانی</button></div></div><div class="logs" id="logs"><div class="muted">در حال دریافت گزارش‌ها…</div></div></section>
@@ -191,6 +192,33 @@
         </section>
       </div>
     </main>
+  </div>
+
+  <div class="modal-backdrop" id="proxy-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>آپلود لیست پروکسی</h3>
+        <button class="close" onclick="closeModal('proxy-modal')">×</button>
+      </div>
+      <p class="modal-help">
+        فایل متنی حاوی پروکسی‌ها را انتخاب کنید. هر خط یک پروکسی.<br>
+        فرمت‌ها: <code>host:port</code> | <code>user:pass@host:port</code> | <code>http://user:pass@host:port</code> | <code>socks5://user:pass@host:port</code>
+      </p>
+      <div class="field">
+        <label>انتخاب فایل پروکسی (.txt)</label>
+        <input type="file" id="proxy-file" accept=".txt,.csv">
+      </div>
+      <div class="field" style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="proxy-replace" checked style="width:auto;margin:0">
+        <label for="proxy-replace" style="margin:0;font-weight:400">جایگزینی لیست قبلی (در غیر این صورت به لیست اضافه می‌شود)</label>
+      </div>
+      <div id="proxy-result" style="display:none;padding:10px;border-radius:8px;font-size:12px;margin-bottom:10px;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-danger" onclick="clearProxies()" style="margin-left:auto">پاک‌سازی لیست</button>
+        <button class="btn btn-light" onclick="closeModal('proxy-modal')">انصراف</button>
+        <button class="btn btn-primary" onclick="submitProxyUpload()">آپلود پروکسی‌ها</button>
+      </div>
+    </div>
   </div>
 
   <div class="modal-backdrop" id="checker-modal"><div class="modal"><div class="modal-head"><h3>بررسی از دیتابیس</h3><button class="close" onclick="closeModal('checker-modal')">×</button></div><p class="modal-help">بازهٔ حساب‌هایی که باید بررسی شوند را مشخص کنید. شمارهٔ ردیف‌ها بر اساس ترتیب جدیدترین حساب‌هاست.</p><div style="display:flex;gap:10px"><div class="field" style="flex:1"><label>از ردیف</label><input id="checker-start" type="number" min="1" value="1"></div><div class="field" style="flex:1"><label>تا ردیف</label><input id="checker-end" type="number" min="1" value="200"></div></div><div class="modal-actions"><button class="btn btn-light" onclick="closeModal('checker-modal')">انصراف</button><button class="btn btn-primary" onclick="submitChecker()">شروع بررسی</button></div></div></div>
@@ -265,6 +293,51 @@
     async function clearLogs() { try { const data = await api('/api/action/clear_logs', {method:'POST'}); logSignature = ''; toast(data.message); loadLogs(); } catch (error) { toast(error.message, true); } }
     function openChecker() { openModal('checker-modal'); } function submitChecker() { const start = Math.max(1, parseInt($('checker-start').value) || 1), end = Math.max(start, parseInt($('checker-end').value) || 200); api('/api/checker/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({start_idx:start,end_idx:end})}).then(data => { closeModal('checker-modal'); toast(data.message); loadStats(); }).catch(error => toast(error.message, true)); }
     
+    async function loadProxyCount() {
+      try {
+        const data = await api('/api/proxies/count');
+        const label = $('proxy-count-label');
+        if (label) label.textContent = data.count > 0 ? `${data.count.toLocaleString('fa-IR')} پروکسی بارگذاری‌شده` : 'بارگذاری لیست پروکسی';
+      } catch(e) {}
+    }
+    function openProxyUpload() {
+      $('proxy-file').value = '';
+      $('proxy-result').style.display = 'none';
+      $('proxy-replace').checked = true;
+      loadProxyCount();
+      openModal('proxy-modal');
+    }
+    async function submitProxyUpload() {
+      const fileInput = $('proxy-file');
+      if (!fileInput.files.length) return toast('لطفاً یک فایل انتخاب کنید.', true);
+      const replace = $('proxy-replace').checked ? '1' : '0';
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      try {
+        const response = await fetch(`/api/proxies/upload?replace=${replace}`, { method: 'POST', body: formData });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error);
+        const resultEl = $('proxy-result');
+        resultEl.style.display = 'block';
+        resultEl.style.background = '#eaf8f1';
+        resultEl.style.color = '#16845b';
+        resultEl.textContent = data.message;
+        toast(data.message);
+        loadProxyCount();
+        loadStats();
+      } catch(error) { toast(error.message, true); }
+    }
+    async function clearProxies() {
+      if (!window.confirm('لیست پروکسی‌های آپلودشده پاک شود؟')) return;
+      try {
+        const data = await api('/api/proxies/clear', { method: 'POST' });
+        toast(data.message);
+        loadProxyCount();
+        loadStats();
+        closeModal('proxy-modal');
+      } catch(error) { toast(error.message, true); }
+    }
+
     function openFileChecker() {
         $('txt-file').value = '';$('txt-progress').style.display = 'none';
         $('txt-actions').style.display = 'flex';$('txt-download-actions').style.display = 'none';
@@ -330,7 +403,7 @@
     async function loadDatabase() { try { const data = await api('/api/database/overview'); if (!data.connected) throw new Error(data.error || 'اتصال Redis برقرار نیست.'); $('session-count').textContent = data.sessions.toLocaleString('fa-IR'); $('db-list').innerHTML = data.items.length ? data.items.map(item => `<div class="db-row"><div><div class="db-label">${escapeHtml(item.label)}</div><div class="db-key">${escapeHtml(item.key)}</div></div><span class="db-count">${item.size.toLocaleString('fa-IR')} مورد</span></div>`).join('') : '<div class="empty">کلیدی برای نمایش وجود ندارد.</div>'; } catch (error) { $('session-count').textContent = '—'; $('db-list').innerHTML = `<div class="empty">${escapeHtml(error.message || 'اطلاعات دیتابیس قابل دریافت نیست.')}</div>`; } }
     function askWipe() { openModal('wipe-modal'); }
     async function wipeDatabase() { if ($('wipe-code').value !== 'NEXUS-WIPE-ALL') return toast('عبارت تأیید درست نیست.', true); try { const data = await api('/api/action/clean', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code:$('wipe-code').value})}); closeModal('wipe-modal'); toast(data.message); loadStats(); loadDatabase(); loadAccounts(); } catch (error) { toast(error.message, true); } }
-    loadStats(); loadLogs(); setInterval(loadStats, 5000); setInterval(loadLogs, 5000);
+    loadStats(); loadLogs(); loadProxyCount(); setInterval(loadStats, 5000); setInterval(loadLogs, 5000); setInterval(loadProxyCount, 10000);
   </script>
 </body>
 </html>
