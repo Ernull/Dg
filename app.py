@@ -53,22 +53,71 @@ except (ValueError, redis.RedisError) as exc:
     db = None
 
 
+def build_session_payload(account, fallback_phone=""):
+    """استخراج یا بازسازی دادهٔ نشست حساب برای ذخیره در jet_session."""
+    if not isinstance(account, dict):
+        account = {}
+    for key in ("data", "session", "session_data"):
+        val = account.get(key)
+        if val is not None and val != "" and val != {}:
+            if isinstance(val, str):
+                return val
+            return json.dumps(val, ensure_ascii=False)
+
+    # در صورتی که فیلدهای اضافیِ نشست مستقیماً در رکورد حساب باشند
+    meta_keys = {"phone", "name", "token", "created_at", "total_orders", "data", "session", "session_data"}
+    extra_data = {k: v for k, v in account.items() if k not in meta_keys}
+    if extra_data:
+        return json.dumps(extra_data, ensure_ascii=False)
+
+    fallback = {
+        "phone": account.get("phone") or fallback_phone,
+        "name": account.get("name", ""),
+        "token": account.get("token", ""),
+    }
+    return json.dumps(fallback, ensure_ascii=False)
+
+
+def remove_all_session_expirations():
+    """حذف انقضا (TTL) از تمام کلیدهای jet_session موجود در Redis."""
+    if not db:
+        return 0
+    persisted = 0
+    try:
+        for key in db.scan_iter(match="jet_session:*", count=500):
+            ttl = db.ttl(key)
+            if ttl and ttl > 0:
+                if db.persist(key):
+                    persisted += 1
+    except Exception:
+        pass
+    return persisted
+
+
 # ================= Token Worker =================
 def token_worker():
+    expirations_cleaned = False
     while True:
         if db:
             try:
+                if not expirations_cleaned:
+                    remove_all_session_expirations()
+                    expirations_cleaned = True
+
                 raw_data = db.lpop("bot:new_accounts")
                 if raw_data:
                     acc = json.loads(raw_data)
                     token = secrets.token_urlsafe(14)
                     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    acc_data = acc.get("data", {})
+                    session_json = json.dumps(acc_data, ensure_ascii=False)
 
-                    db.setex(
+                    # ذخیره دائمی بدون زمان انقضا (حذف محدودیت ۳۰ روزه)
+                    db.set(
                         f"jet_session:{token}",
-                        30 * 24 * 3600,
-                        json.dumps(acc.get("data", {}), ensure_ascii=False),
+                        session_json,
                     )
+                    db.hset("jet:session_backups", token, session_json)
 
                     record = {
                         "phone": acc.get("phone", ""),
@@ -76,6 +125,7 @@ def token_worker():
                         "token": token,
                         "created_at": now_str,
                         "total_orders": 0,
+                        "data": acc_data,
                     }
                     db.hset(
                         "jet:bulk_accounts",
@@ -205,8 +255,15 @@ def account_rows(acc_type, query=""):
         pipe.ttl(f"jet_session:{token}")
 
     link_info = pipe.execute() if usable else []
+    persist_pipe = db.pipeline(transaction=False)
+    needs_persist = False
+
     for index, ((phone, account), values) in enumerate(zip(usable, zip(link_info[::2], link_info[1::2])), 1):
         exists, ttl = values
+        token = account.get("token", "")
+        if exists and ttl and ttl > 0 and token:
+            persist_pipe.persist(f"jet_session:{token}")
+            needs_persist = True
         rows.append(
             {
                 "index": index,
@@ -214,11 +271,18 @@ def account_rows(acc_type, query=""):
                 "name": account.get("name", ""),
                 "created_at": account.get("created_at", ""),
                 "total_orders": account.get("total_orders", 0),
-                "link": f"{WEBHOOK_URL}/auth/{account.get('token', '')}",
+                "link": f"{WEBHOOK_URL}/auth/{token}",
                 "link_active": bool(exists),
-                "link_ttl": ttl if exists else 0,
+                "link_ttl": -1 if exists else 0,
             }
         )
+
+    if needs_persist:
+        try:
+            persist_pipe.execute()
+        except Exception:
+            pass
+
     return rows
 
 
@@ -567,6 +631,7 @@ def handle_action(cmd):
             "jet:processed_phones",
             "jet:bulk_accounts",
             "jet:ordered_accounts",
+            "jet:session_backups",
             "bot:admin_alerts",
             "bot:new_accounts",
             "nexus:checker_logs",
@@ -596,6 +661,7 @@ def delete_account():
             acc = parse_account(rec, phone) or {}
             if acc.get("token"):
                 db.delete(f"jet_session:{acc['token']}")
+                db.hdel("jet:session_backups", acc["token"])
             db.hdel(hash_key, phone)
             db.srem("jet:processed_phones", phone)
             deleted = True
@@ -619,9 +685,111 @@ def revoke_link():
             account = parse_account(raw, phone) or {}
             token = account.get("token")
             if token:
+                existing_session = db.get(f"jet_session:{token}")
+                if existing_session:
+                    db.hset("jet:session_backups", token, existing_session)
+                    if "data" not in account:
+                        try:
+                            account["data"] = json.loads(existing_session)
+                            db.hset(hash_key, phone, json.dumps(account, ensure_ascii=False))
+                        except Exception:
+                            pass
                 db.delete(f"jet_session:{token}")
                 return jsonify({"status": "ok", "message": "لینک ورود این حساب باطل شد."})
     return jsonify({"status": "not_found", "message": "حسابی با این شماره پیدا نشد."}), 404
+
+
+def activate_single_account(hash_key, phone, account):
+    """فعال‌سازی لینک یک حساب و حذف انقضای آن."""
+    updated_record = False
+    token = account.get("token", "")
+    if not token:
+        token = secrets.token_urlsafe(14)
+        account["token"] = token
+        updated_record = True
+
+    session_key = f"jet_session:{token}"
+    if db.exists(session_key):
+        ttl = db.ttl(session_key)
+        persisted = False
+        if ttl and ttl > 0:
+            db.persist(session_key)
+            persisted = True
+        current_val = db.get(session_key)
+        if current_val:
+            db.hset("jet:session_backups", token, current_val)
+        if updated_record:
+            db.hset(hash_key, phone, json.dumps(account, ensure_ascii=False))
+        return False, persisted
+
+    session_str = db.hget("jet:session_backups", token)
+    if not session_str:
+        session_str = build_session_payload(account, phone)
+
+    db.set(session_key, session_str)
+    db.hset("jet:session_backups", token, session_str)
+    if updated_record:
+        db.hset(hash_key, phone, json.dumps(account, ensure_ascii=False))
+    return True, False
+
+
+@app.route("/api/action/activate_link", methods=["POST"])
+@protected
+def activate_link():
+    if not db:
+        return jsonify({"status": "error", "message": "اتصال دیتابیس برقرار نیست."}), 503
+    phone = str((request.json or {}).get("phone", "")).strip()
+    if not phone:
+        return jsonify({"status": "error", "message": "شماره حساب مشخص نیست."}), 400
+
+    for hash_key in ["jet:bulk_accounts", "jet:ordered_accounts"]:
+        raw = db.hget(hash_key, phone)
+        if raw:
+            account = parse_account(raw, phone)
+            if account:
+                activate_single_account(hash_key, phone, account)
+                return jsonify({"status": "ok", "message": "لینک ورود این حساب فعال شد."})
+    return jsonify({"status": "not_found", "message": "حسابی با این شماره پیدا نشد."}), 404
+
+
+@app.route("/api/action/activate_links", methods=["POST"])
+@protected
+def activate_links():
+    if not db:
+        return jsonify({"status": "error", "message": "اتصال دیتابیس برقرار نیست."}), 503
+
+    activated_count = 0
+    persisted_count = 0
+
+    for hash_key in ["jet:bulk_accounts", "jet:ordered_accounts"]:
+        records = db.hgetall(hash_key)
+        for phone, raw in records.items():
+            account = parse_account(raw, phone)
+            if not account:
+                continue
+            was_activated, was_persisted = activate_single_account(hash_key, phone, account)
+            if was_activated:
+                activated_count += 1
+            if was_persisted:
+                persisted_count += 1
+
+    persisted_count += remove_all_session_expirations()
+
+    if activated_count > 0:
+        msg = f"{activated_count} لینک غیرفعال با موفقیت فعال شد."
+    elif persisted_count > 0:
+        msg = f"تمام لینک‌ها فعال هستند و انقضای {persisted_count} لینک حذف شد."
+    else:
+        msg = "تمام لینک‌ها در حال حاضر فعال و بدون انقضا هستند."
+
+    return jsonify(
+        {
+            "status": "ok",
+            "activated": activated_count,
+            "persisted": persisted_count,
+            "message": msg,
+        }
+    )
 
 
 # ================= Proxy Upload =================
@@ -734,7 +902,7 @@ def secure_gateway(token):
     if not session_str:
         return (
             '<html dir="rtl"><body style="background:#f8fafc;color:#e11d48;font-family:Tahoma;text-align:center;padding:50px;">'
-            "<h2>نشست کاربری نامعتبر یا منقضی شده است.</h2></body></html>",
+            "<h2>نشست کاربری نامعتبر یا غیرفعال است.</h2></body></html>",
             404,
         )
     user_agent = request.headers.get("User-Agent", "")
