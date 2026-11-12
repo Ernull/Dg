@@ -65,6 +65,7 @@
     .section-note { font-size: 11px; color: var(--muted); margin: 4px 0 0; }
     .btn { border: 1px solid transparent; border-radius: 8px; padding: 9px 13px; font-size: 11px; font-weight: 700; }
     .btn-primary { color: white; background: var(--blue); } .btn-primary:hover { background: #1d4ed8; }
+    .btn-success { color: white; background: var(--green); } .btn-success:hover { background: #126b49; }
     .btn-light { color: #44536a; background: #fff; border-color: var(--line); } .btn-light:hover { background: #f5f8fc; }
     .btn-danger { color: var(--red); background: var(--red-soft); border-color: #ffd5d2; }
     .btn-danger:hover { background: #ffe4e1; }
@@ -90,7 +91,7 @@
     .tabs { display: flex; gap: 4px; background: #f0f3f8; border-radius: 8px; padding: 3px; }
     .tab { border: 0; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; border-radius: 6px; padding: 8px 12px; }
     .tab.active { color: var(--ink); background: #fff; box-shadow: 0 1px 4px rgba(20,32,51,.08); }
-    .toolbar-tools { display: flex; align-items: center; gap: 8px; }
+    .toolbar-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .search { width: 215px; border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; outline: 0; font-size: 11px; }
     .search:focus { border-color: #8db2f8; box-shadow: 0 0 0 3px #e8f0ff; }
     .table-wrap { overflow-x: auto; } table { width: 100%; border-collapse: collapse; min-width: 820px; }
@@ -170,7 +171,8 @@
                 <button class="engine-action" onclick="openChecker()"><strong>بررسی از دیتابیس</strong><span>بررسی حساب‌های خام</span></button>
                 <button class="engine-action" onclick="openFileChecker()"><strong>بررسی فایل (TXT)</strong><span>دریافت و جداسازی لینک‌ها</span></button>
                 <button class="engine-action" onclick="openProxyUpload()"><strong>آپلود پروکسی</strong><span id="proxy-count-label">بارگذاری لیست پروکسی</span></button>
-                <button class="engine-action" onclick="stopChecker()" style="grid-column:1/-1"><strong>توقف بررسی</strong><span>ارسال سیگنال توقف</span></button>
+                <button class="engine-action" onclick="activateInactiveLinks()"><strong>فعال‌سازی لینک‌های غیرفعال</strong><span>فعال‌سازی مجدد و حذف انقضای لینک‌ها</span></button>
+                <button class="engine-action" onclick="stopChecker()"><strong>توقف بررسی</strong><span>ارسال سیگنال توقف</span></button>
               </div>
             </section>
             <section class="card log-card"><div class="section-head"><div><h2 class="section-title">آخرین گزارش‌ها</h2><p class="section-note">رویدادهای ثبت‌شده توسط موتور</p></div><div><button class="btn btn-light" onclick="clearLogs()" style="margin-left:5px">پاک‌سازی</button><button class="btn btn-light" onclick="loadLogs()">به‌روزرسانی</button></div></div><div class="logs" id="logs"><div class="muted">در حال دریافت گزارش‌ها…</div></div></section>
@@ -180,7 +182,7 @@
         <section id="view-accounts" class="view">
           <div class="section-head"><div><h2 class="section-title">حساب‌ها و لینک‌های ورود</h2><p class="section-note">جست‌‌وجو، کپی، خروجی‌گیری و مدیریت وضعیت لینک هر حساب</p></div><div><button class="btn btn-light" onclick="downloadExport('csv')">خروجی CSV</button> <button class="btn btn-primary" onclick="downloadExport('json')">خروجی JSON</button></div></div>
           <section class="card">
-            <div class="toolbar"><div class="tabs"><button class="tab active" id="tab-normal" onclick="switchAccounts('normal')">حساب‌های پایه</button><button class="tab" id="tab-ordered" onclick="switchAccounts('ordered')">دارای سفارش</button></div><div class="toolbar-tools"><input id="account-search" class="search" placeholder="جست‌وجوی شماره یا نام…" oninput="debouncedAccounts()"><button class="btn btn-light" onclick="copyAllLinks()">کپی لینک‌ها</button></div></div>
+            <div class="toolbar"><div class="tabs"><button class="tab active" id="tab-normal" onclick="switchAccounts('normal')">حساب‌های پایه</button><button class="tab" id="tab-ordered" onclick="switchAccounts('ordered')">دارای سفارش</button></div><div class="toolbar-tools"><input id="account-search" class="search" placeholder="جست‌وجوی شماره یا نام…" oninput="debouncedAccounts()"><button class="btn btn-success" onclick="activateInactiveLinks()">فعال‌سازی لینک‌های غیرفعال</button><button class="btn btn-light" onclick="copyAllLinks()">کپی لینک‌ها</button></div></div>
             <div class="table-wrap"><table><thead><tr><th>#</th><th>شماره</th><th>نام</th><th>تاریخ ثبت</th><th>وضعیت لینک</th><th>لینک ورود</th><th>عملیات</th></tr></thead><tbody id="accounts-body"></tbody></table></div>
             <div class="table-foot"><span id="accounts-count">—</span><span id="accounts-updated">—</span></div>
           </section>
@@ -391,13 +393,41 @@
     function renderAccounts() {
       $('accounts-count').textContent = `${accounts.length.toLocaleString('fa-IR')} حساب`;
       $('accounts-updated').textContent = `آخرین به‌روزرسانی: ${new Date().toLocaleTimeString('fa-IR', {hour:'2-digit',minute:'2-digit'})}`;
-      $('accounts-body').innerHTML = accounts.length ? accounts.map(row => `<tr><td class="row-index">${row.index}</td><td class="phone">${escapeHtml(row.phone)}</td><td class="name">${escapeHtml(row.name || '—')}</td><td class="muted">${escapeHtml(row.created_at || '—')}</td><td><span class="pill ${row.link_active ? 'pill-green' : 'pill-gray'}">${row.link_active ? 'فعال' : 'باطل‌شده'}</span></td><td>${linkCell(row)}</td><td><button class="more-btn" onclick="openRowActions('${encodeURIComponent(row.phone)}')">مدیریت</button></td></tr>`).join('') : '<tr><td class="empty" colspan="7">حسابی با این مشخصات پیدا نشد.</td></tr>';
+      $('accounts-body').innerHTML = accounts.length ? accounts.map(row => `<tr><td class="row-index">${row.index}</td><td class="phone">${escapeHtml(row.phone)}</td><td class="name">${escapeHtml(row.name || '—')}</td><td class="muted">${escapeHtml(row.created_at || '—')}</td><td><span class="pill ${row.link_active ? 'pill-green' : 'pill-gray'}">${row.link_active ? 'فعال' : 'غیرفعال'}</span></td><td>${linkCell(row)}</td><td><button class="more-btn" onclick="openRowActions('${encodeURIComponent(row.phone)}', ${row.link_active ? 'true' : 'false'})">مدیریت</button></td></tr>`).join('') : '<tr><td class="empty" colspan="7">حسابی با این مشخصات پیدا نشد.</td></tr>';
     }
     async function loadAccounts() { try { const q = encodeURIComponent($('account-search').value || ''); const data = await api(`/api/accounts/${accountType}?q=${q}`); accounts = data.data; renderAccounts(); } catch (error) { toast(error.message, true); } }
     async function copyLink(value) { try { await navigator.clipboard.writeText(decodeURIComponent(value)); toast('لینک کپی شد.'); } catch (error) { toast('کپی لینک انجام نشد.', true); } }
     async function copyAllLinks() { if (!accounts.length) return toast('لینکی برای کپی وجود ندارد.', true); try { await navigator.clipboard.writeText(accounts.map(row => row.link).join('\n')); toast(`${accounts.length.toLocaleString('fa-IR')} لینک کپی شد.`); } catch (error) { toast('کپی لینک‌ها انجام نشد.', true); } }
-    function openRowActions(phone) { const decoded = decodeURIComponent(phone); $('confirm-title').textContent = 'مدیریت حساب'; $('confirm-text').textContent = `می‌توانید لینک ورود حساب ${decoded} را باطل کنید یا کل رکورد حساب را حذف کنید.`; $('confirm-action').textContent = 'ابطال لینک'; $('confirm-action').onclick = () => revokeLink(decoded);$('delete-action').onclick = () => deleteAccount(decoded); openModal('confirm-modal'); }
-    async function revokeLink(phone) { closeModal('confirm-modal'); try { const data = await api('/api/action/revoke_link', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone})}); toast(data.message); loadAccounts(); } catch (error) { toast(error.message, true); } }
+    function openRowActions(phone, isActive = true) {
+      const decoded = decodeURIComponent(phone);
+      $('confirm-title').textContent = 'مدیریت حساب';
+      if (isActive) {
+        $('confirm-text').textContent = `می‌توانید لینک ورود حساب ${decoded} را غیرفعال (باطل) کنید یا کل رکورد حساب را حذف کنید.`;
+        $('confirm-action').textContent = 'ابطال لینک';
+        $('confirm-action').className = 'btn btn-primary';
+        $('confirm-action').onclick = () => revokeLink(decoded);
+      } else {
+        $('confirm-text').textContent = `لینک ورود حساب ${decoded} غیرفعال است. می‌توانید آن را مجدداً فعال کنید یا کل رکورد حساب را حذف کنید.`;
+        $('confirm-action').textContent = 'فعال‌سازی لینک';
+        $('confirm-action').className = 'btn btn-success';
+        $('confirm-action').onclick = () => activateSingleLink(decoded);
+      }
+      $('delete-action').onclick = () => deleteAccount(decoded);
+      openModal('confirm-modal');
+    }
+    async function revokeLink(phone) { closeModal('confirm-modal'); try { const data = await api('/api/action/revoke_link', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone})}); toast(data.message); loadAccounts(); if (currentView === 'database') loadDatabase(); } catch (error) { toast(error.message, true); } }
+    async function activateSingleLink(phone) { closeModal('confirm-modal'); try { const data = await api('/api/action/activate_link', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone})}); toast(data.message); loadAccounts(); if (currentView === 'database') loadDatabase(); } catch (error) { toast(error.message, true); } }
+    async function activateInactiveLinks() {
+      try {
+        const data = await api('/api/action/activate_links', {method:'POST'});
+        toast(data.message);
+        if (currentView === 'accounts') loadAccounts();
+        if (currentView === 'database') loadDatabase();
+        loadStats();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    }
     async function deleteAccount(phone) { if (!window.confirm(`رکورد حساب ${phone} حذف شود؟ این کار نشست لینک را هم حذف می‌کند.`)) return; closeModal('confirm-modal'); try { const data = await api('/api/action/delete_account', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone})}); toast(data.message, data.status !== 'ok'); loadAccounts(); loadStats(); loadDatabase(); } catch (error) { toast(error.message, true); } }
     function downloadExport(format) { window.location.href = `/api/export/${accountType}/${format}?q=${encodeURIComponent($('account-search').value || '')}`; }
     async function loadDatabase() { try { const data = await api('/api/database/overview'); if (!data.connected) throw new Error(data.error || 'اتصال Redis برقرار نیست.'); $('session-count').textContent = data.sessions.toLocaleString('fa-IR'); $('db-list').innerHTML = data.items.length ? data.items.map(item => `<div class="db-row"><div><div class="db-label">${escapeHtml(item.label)}</div><div class="db-key">${escapeHtml(item.key)}</div></div><span class="db-count">${item.size.toLocaleString('fa-IR')} مورد</span></div>`).join('') : '<div class="empty">کلیدی برای نمایش وجود ندارد.</div>'; } catch (error) { $('session-count').textContent = '—'; $('db-list').innerHTML = `<div class="empty">${escapeHtml(error.message || 'اطلاعات دیتابیس قابل دریافت نیست.')}</div>`; } }
@@ -407,4 +437,3 @@
   </script>
 </body>
 </html>
-
